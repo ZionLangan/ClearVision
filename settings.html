@@ -96,7 +96,7 @@
                         </div>
                         <div class="tv-card-body">
                             <div class="tv-help-text" style="margin-bottom: 12px;">
-                                Build a hierarchical tree that organizes your lorebook entries into navigable categories. The LLM uses this tree to find relevant entries each turn.
+                                Auto-build a tree from your existing lorebook entries. This is a <strong>migration/onboarding tool</strong> — the primary workflow is to define your schema tree first in the Tree Editor, then let the AI create entries into it. Use these builders to get started from an existing flat lorebook.
                             </div>
                             <div class="tv-button-row">
                                 <button id="tv_build_metadata" class="tv-btn tv-btn-secondary" title="Fast: groups entries by existing WI groups and primary keys. No LLM calls needed.">
@@ -767,6 +767,21 @@
                                             </label>
                                             <div class="tv-help-text" style="margin-top: 4px;">
                                                 Evaluate <code>[mood:X]</code>, <code>[location:X]</code>, <code>[weather:X]</code>, <code>[activity:X]</code>, <code>[relationship:X]</code>, <code>[emotion:X]</code>, and <code>[timeOfDay:X]</code> conditions on lorebook entries. Add these as keywords and the sidecar will evaluate scene state to decide if entries should activate.
+                                            </div>
+                                        </div>
+                                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--SmartThemeBorderColor);">
+                                            <label class="tv-toggle">
+                                                <input id="tv_sidecar_follow_links" type="checkbox" checked />
+                                                <span class="tv-toggle-slider"></span>
+                                                <span class="tv-toggle-label">Follow Entry Links</span>
+                                            </label>
+                                            <div class="tv-help-text" style="margin-top: 4px;">
+                                                When retrieving entries, automatically follow bidirectional links to include related entries. Useful for bringing in connected context (e.g., a character's location when retrieving the character).
+                                            </div>
+                                            <div class="tv-number-row" style="margin-top: 8px;">
+                                                <label class="tv-number-label" for="tv_sidecar_link_depth">Link Depth:</label>
+                                                <input type="number" id="tv_sidecar_link_depth" class="tv-number-input" min="1" max="5" step="1" value="2" />
+                                                <span class="tv-help-text" style="margin: 0;">(hops from original entry)</span>
                                             </div>
                                         </div>
                                     </div>

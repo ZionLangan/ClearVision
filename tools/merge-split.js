@@ -27,6 +27,8 @@ export function getDefinition() {
         displayName: 'TunnelVision Merge/Split',
         description: `Merge two related memory entries into one, or split a large entry into focused pieces. Use merge when two entries cover the same topic and should be consolidated. Use split when one entry covers multiple distinct topics and would be better as separate entries.
 
+Schema-aware: When merging entries under the same schema node, combine content section-by-section if possible. When splitting, both resulting entries inherit the same schema template — distribute content appropriately across sections.
+
 Actions:
 - "merge": Combine two entries into one. You must provide keep_uid (entry to keep) and remove_uid (entry to absorb). Optionally provide a rewritten merged_content and merged_title.
 - "split": Divide one entry into two. You must provide the uid to split and specify what content stays (keep_content) vs. what becomes a new entry (new_content, new_title).

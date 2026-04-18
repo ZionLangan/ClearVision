@@ -9,7 +9,7 @@
  */
 
 import { loadWorldInfo } from '../../../../world-info.js';
-import { getSettings } from '../tree-store.js';
+import { getSettings, getTree, getEffectiveTemplate, hasEffectiveTemplate } from '../tree-store.js';
 import { createEntry } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 
@@ -107,10 +107,12 @@ export function getDefinition() {
 
 You can also use this to create TRACKER entries — structured schemas for tracking things like character moods, inventory, relationships, positions, or any other state that changes over time. When creating a tracker, design a clear structured format (use headers, bullet points, key:value pairs) that will be easy to update later with TunnelVision_Update. The user may ask you to help design a tracker schema — propose a structured format, discuss it with them, and save the final version.
 
+Schema-aware: When saving to a node that has a schema template, you MUST structure your content using the sections defined by that template. The schema will be shown to you in the response after you provide a node_id. Follow the section headings exactly.
+
 Available lorebooks:
 ${bookDesc}
 
-Save entries to the lorebook where they belong based on the descriptions above. Provide a descriptive title, the content to remember, optional keywords for cross-referencing, and optionally a tree node_id to file it under (omit to place at root).`,
+Save entries to the lorebook where they belong based on the descriptions above. Provide a descriptive title, the content to remember, optional keywords for cross-referencing, and a tree node_id to file it under.`,
         parameters: {
             type: 'object',
             properties: {
@@ -135,6 +137,18 @@ Save entries to the lorebook where they belong based on the descriptions above. 
                     type: 'string',
                     description: 'Optional tree node ID to file this entry under. Omit to place at the root level.',
                 },
+                links: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            uid: { type: 'number', description: 'UID of the linked entry' },
+                            relation: { type: 'string', description: 'Type of relationship (e.g., "lives_in", "knows", "works_at")' },
+                        },
+                        required: ['uid', 'relation'],
+                    },
+                    description: 'Optional cross-references to other entries with relationship types. Links are bidirectional.',
+                },
             },
             required: ['lorebook', 'title', 'content'],
         },
@@ -145,6 +159,19 @@ Save entries to the lorebook where they belong based on the descriptions above. 
 
             const { book: lorebook, error } = resolveTargetBook(args.lorebook, { checkWrite: true });
             if (error) return error;
+
+            // Resolve schema for the target node (before saving)
+            let schemaInfo = '';
+            const targetNodeId = args.node_id || null;
+            if (targetNodeId) {
+                const tree = getTree(lorebook);
+                if (tree?.root) {
+                    const template = getEffectiveTemplate(tree, targetNodeId);
+                    if (template) {
+                        schemaInfo = `\n\n📋 Schema template for this node:\n${template}\n(Content has been structured according to this template.)`;
+                    }
+                }
+            }
 
             // Dedup check (non-blocking — warns but still saves)
             let dedupWarning = '';
@@ -168,9 +195,14 @@ Save entries to the lorebook where they belong based on the descriptions above. 
                     content: args.content,
                     comment: args.title,
                     keys: args.keys || [],
-                    nodeId: args.node_id || null,
+                    nodeId: targetNodeId,
+                    links: args.links,
                 });
-                return `Saved memory: "${result.comment}" (UID ${result.uid}) → category "${result.nodeLabel}" in "${lorebook}".${dedupWarning}`;
+                let linkInfo = '';
+                if (args.links && args.links.length > 0) {
+                    linkInfo = `\n🔗 Created ${args.links.length} link(s).`;
+                }
+                return `Saved memory: "${result.comment}" (UID ${result.uid}) → category "${result.nodeLabel}" in "${lorebook}".${schemaInfo}${dedupWarning}${linkInfo}`;
             } catch (e) {
                 console.error('[TunnelVision] Remember failed:', e);
                 return `Failed to save memory: ${e.message}`;

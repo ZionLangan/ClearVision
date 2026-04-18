@@ -25,6 +25,12 @@ import {
     isTrackerTitle,
     isTrackerUid,
     setTrackerUid,
+    addEntryLink,
+    removeEntryLink,
+    removeAllLinksToEntry,
+    getEntryLinks,
+    getEffectiveTemplate,
+    getAllEntryUids,
 } from './tree-store.js';
 
 /**
@@ -35,9 +41,10 @@ import {
  * @param {string} params.comment - Entry title/comment
  * @param {string[]} [params.keys] - Primary trigger keys
  * @param {string} [params.nodeId] - Tree node to assign to (defaults to root)
+ * @param {Array<{uid: number, relation: string}>} [params.links] - Cross-references to other entries
  * @returns {Promise<{uid: number, comment: string, nodeLabel: string}>}
  */
-export async function createEntry(bookName, { content, comment, keys, nodeId }) {
+export async function createEntry(bookName, { content, comment, keys, nodeId, links }) {
     if (!content || !content.trim()) {
         throw new Error('Entry content cannot be empty.');
     }
@@ -92,6 +99,15 @@ export async function createEntry(bookName, { content, comment, keys, nodeId }) 
         setTrackerUid(bookName, newEntry.uid, true);
     }
 
+    // Process entry links
+    if (Array.isArray(links) && links.length > 0) {
+        for (const link of links) {
+            if (link.uid && link.relation) {
+                addEntryLink(bookName, newEntry.uid, link.uid, link.relation);
+            }
+        }
+    }
+
     console.log(`[TunnelVision] Created entry "${comment}" (UID ${newEntry.uid}) in "${bookName}" → ${nodeLabel}`);
     return { uid: newEntry.uid, comment: newEntry.comment, nodeLabel };
 }
@@ -104,6 +120,7 @@ export async function createEntry(bookName, { content, comment, keys, nodeId }) 
  * @param {string} [updates.content] - New content (replaces entirely)
  * @param {string} [updates.comment] - New comment/title
  * @param {string[]} [updates.keys] - New primary keys
+ * @param {Array<{uid: number, relation: string}>} [updates.links] - New links (replaces existing)
  * @returns {Promise<{uid: number, comment: string, updated: string[]}>}
  */
 export async function updateEntry(bookName, uid, updates) {
@@ -130,6 +147,25 @@ export async function updateEntry(bookName, uid, updates) {
     if (Array.isArray(updates.keys)) {
         entry.key = updates.keys.map(k => String(k).trim()).filter(Boolean);
         changed.push('keys');
+    }
+
+    // Handle links - remove all existing, then add new ones
+    if (updates.links !== undefined) {
+        // Remove all existing links from this entry
+        const existingLinks = getEntryLinks(bookName, uid);
+        for (const link of existingLinks) {
+            removeEntryLink(bookName, uid, link.uid);
+        }
+
+        // Add new links
+        if (Array.isArray(updates.links) && updates.links.length > 0) {
+            for (const link of updates.links) {
+                if (link.uid && link.relation) {
+                    addEntryLink(bookName, uid, link.uid, link.relation);
+                }
+            }
+        }
+        changed.push('links');
     }
 
     if (changed.length === 0) {
@@ -183,6 +219,9 @@ export async function forgetEntry(bookName, uid, hardDelete = false) {
     }
 
     await saveWorldInfo(bookName, bookData, true);
+
+    // Remove all links referencing this entry
+    removeAllLinksToEntry(bookName, uid);
 
     // Remove from tree regardless
     const tree = getTree(bookName);
@@ -455,6 +494,27 @@ export async function splitEntry(bookName, uid, { keepContent, keepTitle, newCon
         newTitle: newResult.comment,
         nodeLabel: newResult.nodeLabel,
     };
+}
+
+// --- Template Helper ---
+
+/**
+ * Get the effective template for an entry by finding which node contains it
+ * and resolving the accumulated template from that node's ancestors.
+ * @param {string} bookName - Lorebook name
+ * @param {number} uid - Entry UID
+ * @returns {Promise<string>} The effective template string (empty if no template defined)
+ */
+export async function getTemplateForEntry(bookName, uid) {
+    const tree = getTree(bookName);
+    if (!tree || !tree.root) return '';
+
+    // Find which node contains this entry
+    const containingNode = findNodeContainingUid(tree.root, uid);
+    if (!containingNode) return '';
+
+    // Get the effective template for this node
+    return getEffectiveTemplate(tree, containingNode.id);
 }
 
 // --- Shared helpers ---

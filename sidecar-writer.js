@@ -22,6 +22,8 @@ import {
     findNodeById,
     getAllEntryUids,
     getSettings,
+    getEffectiveTemplate,
+    hasEffectiveTemplate,
 } from './tree-store.js';
 import { getReadableBooks, checkToolConfirmation, REMEMBER_NAME, UPDATE_NAME, FORGET_NAME, SUMMARIZE_NAME, REORGANIZE_NAME, MERGESPLIT_NAME } from './tool-registry.js';
 import { isSidecarConfigured, sidecarGenerate, getSidecarModelLabel } from './llm-sidecar.js';
@@ -38,6 +40,7 @@ import { logSidecarWrite } from './activity-feed.js';
 /**
  * Build a compact tree overview for the sidecar writer prompt.
  * Includes entry titles/UIDs so the sidecar can reference existing entries for updates.
+ * Also includes schema templates for nodes that have them.
  * @returns {Promise<string>}
  */
 async function buildWriterTreeOverview() {
@@ -51,12 +54,12 @@ async function buildWriterTreeOverview() {
 
         const bookData = await loadWorldInfo(bookName);
         overview += `Lorebook: ${bookName}\n`;
-        overview += formatWriterNode(tree.root, 0, true, bookData?.entries);
+        overview += formatWriterNode(tree.root, 0, true, bookData?.entries, tree);
         overview += '\n';
     }
 
     // Cap to avoid blowing sidecar context (higher than retrieval since we include content snippets)
-    const maxLen = 8000;
+    const maxLen = 10000; // Increased slightly to accommodate templates
     if (overview.length > maxLen) {
         overview = overview.substring(0, maxLen - 80) + '\n  ... (tree truncated)\n';
     }
@@ -65,14 +68,15 @@ async function buildWriterTreeOverview() {
 }
 
 /**
- * Recursively format a node, including entry titles for update reference.
+ * Recursively format a node, including entry titles for update reference and schema templates.
  * @param {Object} node
  * @param {number} depth
  * @param {boolean} isRoot
  * @param {Object} [entries] - lorebook entries object for title lookup
+ * @param {Object} [tree] - tree object for template lookup
  * @returns {string}
  */
-function formatWriterNode(node, depth, isRoot, entries) {
+function formatWriterNode(node, depth, isRoot, entries, tree) {
     const indent = '  '.repeat(depth);
     const children = node.children || [];
     const entryUids = node.entryUids || [];
@@ -86,6 +90,14 @@ function formatWriterNode(node, depth, isRoot, entries) {
         const isLeaf = children.length === 0;
         const type = isLeaf ? 'leaf' : 'branch';
         text += `${indent}[${node.id}] ${node.label || 'Unnamed'} [${type}]\n`;
+
+        // Show schema template if present
+        if (tree && hasEffectiveTemplate(tree, node.id)) {
+            const template = getEffectiveTemplate(tree, node.id);
+            if (template) {
+                text += `${indent}  📋 Schema Template:\n${indent}  ${template.replace(/\n/g, '\n' + indent + '  ')}\n`;
+            }
+        }
     }
 
     // Show entry titles + content snippets so sidecar can detect duplicates and prefer updates
@@ -106,7 +118,7 @@ function formatWriterNode(node, depth, isRoot, entries) {
     }
 
     for (const child of children) {
-        text += formatWriterNode(child, depth + 1, false, entries);
+        text += formatWriterNode(child, depth + 1, false, entries, tree);
     }
 
     return text;
@@ -189,6 +201,14 @@ Rules:
 - Focus on: character development, relationship changes, plot events, world-building facts, status changes
 - If nothing significant happened, return: {"reasoning": "No significant events to record", "remember": [], "update": [], "merge": [], "summarize": [], "forget": [], "reorganize": [], "split": []}
 
+CRITICAL — Schema Compliance:
+- When creating or updating entries under a node with a schema template, you MUST structure your content according to that template
+- Schema templates are shown under each node in the tree overview (marked with 📋)
+- Use the exact section headings defined by the template (e.g., "# Appearance", "# Personality")
+- Fill all relevant sections with appropriate content; omit only sections that don't apply
+- When updating a templated entry, preserve its structure — only modify the values that changed, keep existing sections intact
+- Do not remove sections from a templated entry unless they are genuinely no longer relevant
+
 CRITICAL — Deduplication:
 - READ the content snippets shown for each existing entry carefully
 - If an existing entry already covers the same fact, DO NOT create a new "remember" — use "update" on that UID instead, or skip it entirely
@@ -220,7 +240,7 @@ Response format:
 {
   "reasoning": "A brief explanation of why these operations are needed",
   "remember": [
-    {"lorebook": "BookName", "title": "Entry Title", "content": "The fact to remember...", "keys": ["keyword1", "keyword2"]}
+    {"lorebook": "BookName", "title": "Entry Title", "content": "The fact to remember...", "keys": ["keyword1", "keyword2"], "node_id": "tv_xxx_yyy"}
   ],
   "update": [
     {"lorebook": "BookName", "uid": 123, "content": "Updated content...", "title": "Optional new title"}
@@ -311,6 +331,7 @@ function parseWriteOps(response) {
                     title: String(r.title).substring(0, 200),
                     content: String(r.content).substring(0, 2000),
                     keys: Array.isArray(r.keys) ? r.keys.map(String).slice(0, 10) : [],
+                    node_id: r.node_id ? String(r.node_id) : undefined,
                 });
             }
         }
@@ -461,6 +482,7 @@ async function executeWriteOps(ops, reasoning = '') {
                     title: op.title,
                     content: op.content,
                     keys: op.keys,
+                    node_id: op.node_id,
                 });
             } else if (op.type === 'update') {
                 result = await updateAction({

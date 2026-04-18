@@ -16,6 +16,10 @@ import {
     findNodeById,
     getAllEntryUids,
     getSettings,
+    parseTemplateSections,
+    hasEffectiveTemplate,
+    getEntryLinks,
+    getBackLinks,
 } from '../tree-store.js';
 import { getReadableBooks } from '../tool-registry.js';
 import { getKeywordTriggeredUids } from '../index.js';
@@ -137,7 +141,11 @@ function formatChildrenForNavigation(parentNode) {
         const hasChildren = (child.children || []).length > 0;
         const depthIndicator = hasChildren ? ' [has sub-categories]' : ' [leaf]';
 
-        text += `  - [${child.id}] ${child.label || 'Unnamed'}${depthIndicator} (${entryCount} entries)\n`;
+        // Schema marker: show own sections if templated
+        const ownSections = parseTemplateSections(child.template);
+        const schemaTag = ownSections.length > 0 ? ` [schema: ${ownSections.join(', ')}]` : '';
+
+        text += `  - [${child.id}] ${child.label || 'Unnamed'}${depthIndicator}${schemaTag} (${entryCount} entries)\n`;
         if (child.summary) {
             text += `    Summary: ${child.summary}\n`;
         }
@@ -179,7 +187,9 @@ function buildUnifiedTreeOverview() {
             const entryCount = getAllEntryUids(child).length;
             const hasChildren = (child.children || []).length > 0;
             const depthIndicator = hasChildren ? ' [has sub-categories]' : ' [leaf]';
-            overview += `  - [${child.id}] ${child.label || 'Unnamed'}${depthIndicator} (${entryCount} entries, from: ${bookName})\n`;
+            const ownSections = parseTemplateSections(child.template);
+            const schemaTag = ownSections.length > 0 ? ` [schema: ${ownSections.join(', ')}]` : '';
+            overview += `  - [${child.id}] ${child.label || 'Unnamed'}${depthIndicator}${schemaTag} (${entryCount} entries, from: ${bookName})\n`;
             if (child.summary) {
                 overview += `    Summary: ${child.summary}\n`;
             }
@@ -282,10 +292,12 @@ function formatCollapsedNode(node, depth, isRoot = false, maxDepth = Infinity) {
             text += `${indent}[${node.id}] ROOT (${directEntries} direct entries)\n`;
         }
     } else {
-        // Regular node: show ID, label, summary, entry counts
+        // Regular node: show ID, label, summary, entry counts, schema
         const isLeaf = children.length === 0;
         const type = isLeaf ? 'leaf' : 'branch';
-        text += `${indent}[${node.id}] ${node.label || 'Unnamed'} [${type}] (${totalEntries} entries`;
+        const ownSections = parseTemplateSections(node.template);
+        const schemaTag = ownSections.length > 0 ? ` [schema: ${ownSections.join(', ')}]` : '';
+        text += `${indent}[${node.id}] ${node.label || 'Unnamed'} [${type}]${schemaTag} (${totalEntries} entries`;
         if (!isLeaf && directEntries > 0) {
             text += `, ${directEntries} direct`;
         }
@@ -366,7 +378,29 @@ function pushResolvedEntries(results, seenEntries, bookName, uidMap, uids) {
         const title = entry.comment || entry.key?.[0] || `Entry #${uid}`;
         const triggered = getKeywordTriggeredUids().has(Number(uid));
         const tag = triggered ? ' | ⚡ Already in context via keyword trigger' : '';
-        results.push(`[Lorebook: ${bookName} | UID: ${uid} | Title: ${title}${tag}]\n${entry.content}`);
+
+        // Include links if any
+        const links = getEntryLinks(bookName, uid);
+        let linkInfo = '';
+        if (links && links.length > 0) {
+            const linkText = links.map(l => `[${l.relation} → #${l.uid}]`).join(', ');
+            linkInfo = `\n🔗 Links: ${linkText}`;
+        }
+
+        // Include schema if the entry's node has one
+        const tree = getTree(bookName);
+        let schemaInfo = '';
+        if (tree?.root) {
+            const node = findEntryNode(tree.root, uid);
+            if (node && hasEffectiveTemplate(tree.root, node.id)) {
+                const template = getEffectiveTemplate(tree, node.id);
+                if (template) {
+                    schemaInfo = `\n📋 Schema: ${template.replace(/\n/g, ', ')}`;
+                }
+            }
+        }
+
+        results.push(`[Lorebook: ${bookName} | UID: ${uid} | Title: ${title}${tag}${linkInfo}${schemaInfo}]\n${entry.content}`);
     }
 }
 
@@ -632,12 +666,16 @@ CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword
                 },
                 action: {
                     type: 'string',
-                    enum: ['retrieve', 'navigate', 'search'],
-                    description: '"retrieve" to get entry content (default). "navigate" to see a node\'s children. "search" to find entries by keyword across all lorebooks.',
+                    enum: ['retrieve', 'navigate', 'search', 'linked'],
+                    description: '"retrieve" to get entry content (default). "navigate" to see a node\'s children. "search" to find entries by keyword across all lorebooks. "linked" to retrieve entries linked to a specific entry.',
                 },
                 query: {
                     type: 'string',
                     description: 'For action "search": keyword or phrase to find across all lorebooks. Matches entry titles, keywords, and content.',
+                },
+                uid: {
+                    type: 'number',
+                    description: 'For action "linked": the UID of the entry whose linked entries you want to retrieve.',
                 },
                 ...entryUidsParam,
             },
@@ -652,12 +690,16 @@ CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword
                 },
                 action: {
                     type: 'string',
-                    enum: ['navigate', 'retrieve', 'search'],
-                    description: '"navigate" to see children, "retrieve" to get entry content. "search" to find entries by keyword across all lorebooks. Auto-detects: navigate if node has children, retrieve if leaf.',
+                    enum: ['retrieve', 'navigate', 'search', 'linked'],
+                    description: '"retrieve" to get entry content (default). "navigate" to see a node\'s children. "search" to find entries by keyword across all lorebooks. "linked" to retrieve entries linked to a specific entry.',
                 },
                 query: {
                     type: 'string',
                     description: 'For action "search": keyword or phrase to find across all lorebooks. Matches entry titles, keywords, and content.',
+                },
+                uid: {
+                    type: 'number',
+                    description: 'For action "linked": the UID of the entry whose linked entries you want to retrieve.',
                 },
                 ...entryUidsParam,
             },
@@ -683,6 +725,11 @@ CROSS-BOOK SEARCH: Use action "search" with a "query" to find entries by keyword
             // Cross-book keyword search
             if (args.action === 'search') {
                 return handleCrossBookSearch(args, selective);
+            }
+
+            // Linked entries: retrieve entries linked to a specific entry
+            if (args.action === 'linked') {
+                return handleLinkedEntries(args);
             }
 
             // Collapsed mode: support node_ids (array) or node_id (string)
@@ -956,6 +1003,102 @@ async function handleCrossBookSearch(args, selective = false) {
         ? 'To get full entry content, call again with entry_uids containing the UIDs you want. Or use Update/Forget with a UID.'
         : 'Use action "retrieve" with node_id to get full content, or Update/Forget with the UID.';
     return response;
+}
+
+/**
+ * Handle the "linked" action — retrieve entries linked to a specific entry.
+ * @param {Object} args
+ * @returns {Promise<string>}
+ */
+async function handleLinkedEntries(args) {
+    const uid = args.uid;
+    if (!uid) {
+        return 'For action "linked", the uid parameter is required (the entry UID whose linked entries you want to retrieve).';
+    }
+
+    const activeBooks = getReadableBooks();
+    const linkedEntries = [];
+
+    // Collect all links from the specified entry across all books
+    for (const bookName of activeBooks) {
+        const links = getEntryLinks(bookName, uid);
+        if (links && links.length > 0) {
+            linkedEntries.push(...links.map(l => ({ ...l, bookName })));
+        }
+    }
+
+    if (linkedEntries.length === 0) {
+        const entryInfo = await findEntryByUidAcrossBooks(uid);
+        if (entryInfo) {
+            return `Entry UID ${uid} ("${entryInfo.title}") has no linked entries in any active lorebook.`;
+        }
+        return `Entry UID ${uid} not found in any active lorebook.`;
+    }
+
+    // Find the source entry for context
+    const sourceInfo = await findEntryByUidAcrossBooks(uid);
+    const sourceTitle = sourceInfo ? sourceInfo.title : `UID ${uid}`;
+
+    // Retrieve all linked entries
+    const results = [];
+    const seen = new Set();
+
+    for (const link of linkedEntries) {
+        const { uid: linkedUid, relation, bookName } = link;
+        const key = `${bookName}:${linkedUid}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const bookData = await loadWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+
+        const entry = findEntryByUid(bookData.entries, linkedUid);
+        if (!entry || entry.disable) continue;
+
+        results.push({
+            uid: linkedUid,
+            title: entry.comment || entry.key?.[0] || `#${linkedUid}`,
+            bookName,
+            relation,
+            content: entry.content,
+        });
+    }
+
+    if (results.length === 0) {
+        return `Entry "${sourceTitle}" (UID ${uid}) has ${linkedEntries.length} link(s), but none of the linked entries were found (they may be disabled or deleted).`;
+    }
+
+    // Build response
+    let response = `Linked entries for "${sourceTitle}" (UID ${uid}):\n\n`;
+
+    for (const r of results) {
+        response += `— "${r.title}" (UID ${r.uid}, ${r.bookName}) [${r.relation}]\n`;
+        response += `  ${r.content.substring(0, 500)}${r.content.length > 500 ? '...' : ''}\n\n`;
+    }
+
+    console.log(`[TunnelVision] Linked entries for UID ${uid}: ${results.length} entry/entries retrieved`);
+    return response;
+}
+
+/**
+ * Find an entry by UID across all active lorebooks.
+ * @param {number} uid
+ * @returns {Promise<{uid: number, title: string, bookName: string}|null>}
+ */
+async function findEntryByUidAcrossBooks(uid) {
+    for (const bookName of getReadableBooks()) {
+        const bookData = await loadWorldInfo(bookName);
+        if (!bookData?.entries) continue;
+        const entry = findEntryByUid(bookData.entries, uid);
+        if (entry) {
+            return {
+                uid: entry.uid,
+                title: entry.comment || entry.key?.[0] || `#${uid}`,
+                bookName,
+            };
+        }
+    }
+    return null;
 }
 
 /**

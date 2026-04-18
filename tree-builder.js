@@ -1057,3 +1057,210 @@ function chunkMessages(messages, charLimit) {
     if (current.length > 0) chunks.push(current);
     return chunks;
 }
+
+// ── Template Suggestions ─────────────────────────────────────────────
+
+/**
+ * Suggest templates for tree nodes based on node label and entry content.
+ * Uses heuristics to detect common section patterns and suggests markdown headings.
+ * This is a best-effort suggestion for users to review and adjust.
+ *
+ * @param {import('./tree-store.js').TreeIndex} tree - The tree to analyze
+ * @param {string} lorebookName - Name of the lorebook (for loading entries)
+ * @param {Object} [options]
+ * @param {boolean} [options.useLLM=false] - If true, use LLM for suggestions (slower but smarter)
+ * @param {function} [options.onProgress] - Progress callback (message, percent)
+ * @returns {Promise<Map<string, string>>} - Map of nodeId → suggested template string
+ */
+export async function suggestTemplatesForTree(tree, lorebookName, options = {}) {
+    const { useLLM = false, onProgress = () => {} } = options;
+    const suggestions = new Map();
+
+    if (!tree?.root) return suggestions;
+
+    const bookData = await loadWorldInfo(lorebookName);
+    if (!bookData?.entries) return suggestions;
+
+    // Collect all nodes that have entries
+    const nodesToAnalyze = [];
+    function collectNodes(node) {
+        if (node === tree.root) {
+            for (const child of (node.children || [])) collectNodes(child);
+            return;
+        }
+        const uids = node.entryUids || [];
+        if (uids.length > 0) {
+            nodesToAnalyze.push(node);
+        }
+        for (const child of (node.children || [])) collectNodes(child);
+    }
+    collectNodes(tree.root);
+
+    if (nodesToAnalyze.length === 0) {
+        onProgress('No nodes with entries found', 100);
+        return suggestions;
+    }
+
+    if (useLLM) {
+        // LLM-based suggestions (slower but smarter)
+        for (let i = 0; i < nodesToAnalyze.length; i++) {
+            const node = nodesToAnalyze[i];
+            const pct = Math.round((i / nodesToAnalyze.length) * 100);
+            onProgress(`Analyzing node ${i + 1}/${nodesToAnalyze.length}`, pct);
+
+            const suggestion = await suggestTemplateWithLLM(node, bookData);
+            if (suggestion) {
+                suggestions.set(node.id, suggestion);
+            }
+        }
+    } else {
+        // Heuristic-based suggestions (fast)
+        onProgress('Analyzing nodes for template patterns...', 50);
+        for (const node of nodesToAnalyze) {
+            const suggestion = suggestTemplateHeuristic(node, bookData);
+            if (suggestion) {
+                suggestions.set(node.id, suggestion);
+            }
+        }
+        onProgress('Template suggestions complete', 100);
+    }
+
+    return suggestions;
+}
+
+/**
+ * Suggest a template for a node using heuristic pattern matching.
+ * Looks for common section headers in entry content and aggregates them.
+ *
+ * @param {import('./tree-store.js').TreeNode} node
+ * @param {Object} bookData - Lorebook entry data
+ * @returns {string|null} - Suggested template as markdown headings, or null
+ */
+function suggestTemplateHeuristic(node, bookData) {
+    const uids = node.entryUids || [];
+    if (uids.length === 0) return null;
+
+    // Collect all section patterns from entries
+    const sectionCounts = new Map();
+
+    // Common section patterns to look for
+    const sectionPatterns = [
+        { pattern: /^(#+\s*)?(appearance|looks|physical|description|body|face|hair|eyes|height|weight|build)/i, label: 'Appearance' },
+        { pattern: /^(#+\s*)?(personality|character|traits|behavior|temperament|mannerisms)/i, label: 'Personality' },
+        { pattern: /^(#+\s*)?(background|history|backstory|origin|past|biography)/i, label: 'Background' },
+        { pattern: /^(#+\s*)?(abilities|powers|skills|capabilities|combat|magic|techniques)/i, label: 'Abilities' },
+        { pattern: /^(#+\s*)?(equipment|gear|items|possessions|inventory|weapons|armor)/i, label: 'Equipment' },
+        { pattern: /^(#+\s*)?(relationships|friends|family|allies|enemies|connections)/i, label: 'Relationships' },
+        { pattern: /^(#+\s*)?(location|setting|atmosphere|environment|climate|geography)/i, label: 'Location' },
+        { pattern: /^(#+\s*)?(culture|society|government|politics|economy|religion)/i, label: 'Culture' },
+        { pattern: /^(#+\s*)?(history|timeline|events|lore|legend)/i, label: 'History' },
+        { pattern: /^(#+\s*)?(notes|details|other|misc|additional)/i, label: 'Notes' },
+    ];
+
+    // Analyze each entry's content for sections
+    let totalEntries = 0;
+    for (const uid of uids) {
+        const entry = findEntryByUid(bookData.entries, uid);
+        if (!entry?.content) continue;
+
+        totalEntries++;
+        const lines = entry.content.split('\n');
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+
+            for (const { pattern, label } of sectionPatterns) {
+                if (pattern.test(trimmed)) {
+                    const count = sectionCounts.get(label) || 0;
+                    sectionCounts.set(label, count + 1);
+                    break; // Only match one pattern per line
+                }
+            }
+        }
+    }
+
+    if (totalEntries === 0 || sectionCounts.size === 0) {
+        return null;
+    }
+
+    // Only suggest sections that appear in at least 30% of entries
+    const threshold = Math.max(1, Math.ceil(totalEntries * 0.3));
+    const suggestedSections = [...sectionCounts.entries()]
+        .filter(([_, count]) => count >= threshold)
+        .map(([section]) => `# ${section}`)
+        .join('\n');
+
+    return suggestedSections || null;
+}
+
+/**
+ * Suggest a template for a node using LLM analysis.
+ * Reads entry content and asks LLM to identify common section patterns.
+ *
+ * @param {import('./tree-store.js').TreeNode} node
+ * @param {Object} bookData - Lorebook entry data
+ * @returns {Promise<string|null>} - Suggested template as markdown headings, or null
+ */
+async function suggestTemplateWithLLM(node, bookData) {
+    const uids = node.entryUids || [];
+    if (uids.length === 0) return null;
+
+    // Sample entries to avoid sending too much content
+    const sampleLimit = Math.min(uids.length, 10);
+    const sampleUids = uids.slice(0, sampleLimit);
+
+    const entrySamples = [];
+    for (const uid of sampleUids) {
+        const entry = findEntryByUid(bookData.entries, uid);
+        if (entry?.content) {
+            // Truncate very long entries
+            const content = entry.content.length > 1000
+                ? entry.content.substring(0, 1000) + '...'
+                : entry.content;
+            entrySamples.push(`Entry: ${entry.comment || entry.key?.[0] || `#${uid}`}\n${content}`);
+        }
+    }
+
+    if (entrySamples.length === 0) return null;
+
+    const prompt = `Analyze these ${entrySamples.length} lorebook entry samples and identify common section patterns or headings they use. The entries are for category "${node.label}".
+
+Entry samples:
+${entrySamples.join('\n\n---\n\n')}
+
+Based on these samples, suggest a template with section headings that would be appropriate for this category.
+
+Rules:
+- Return ONLY a list of markdown section headings (e.g., "# Appearance\n# Personality")
+- Each section should be a # followed by a brief section name
+- Include only sections that would be commonly used for this type of entry
+- 3-7 sections is a good range
+- Do NOT include the response text, just the headings`;
+
+    try {
+        const response = await generateRaw({
+            prompt,
+            systemPrompt: 'You are a template designer. Return only markdown section headings, one per line, starting with #.',
+        });
+
+        if (!response) return null;
+
+        // Extract only markdown headings from response
+        const lines = response.split('\n');
+        const headings = lines
+            .map(line => line.trim())
+            .filter(line => line.startsWith('#') && line.length > 1)
+            .map(line => {
+                // Normalize to single # level
+                const match = line.match(/^#+\s*(.+)$/);
+                return match ? `# ${match[1]}` : null;
+            })
+            .filter(Boolean);
+
+        return headings.length > 0 ? headings.join('\n') : null;
+    } catch (e) {
+        console.warn(`[TunnelVision] LLM template suggestion failed for "${node.label}":`, e);
+        return null;
+    }
+}

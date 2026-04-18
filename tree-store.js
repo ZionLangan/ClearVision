@@ -19,6 +19,7 @@ const TRACKER_TITLE_PREFIX = /^\[tracker[^\]]*\]/i;
  * @property {number[]} entryUids - WI entry UIDs directly under this node
  * @property {TreeNode[]} children - Sub-categories
  * @property {boolean} collapsed - UI state for tree editor
+ * @property {string} template - Markdown template for entries under this node (sections accumulate via inheritance)
  */
 
 /**
@@ -45,6 +46,7 @@ export function createTreeNode(label = 'New Category', summary = '') {
         entryUids: [],
         children: [],
         collapsed: false,
+        template: '',
     };
 }
 
@@ -52,7 +54,7 @@ export function createEmptyTree(lorebookName) {
     return {
         lorebookName,
         root: createTreeNode('Root', `Top-level index for ${lorebookName}`),
-        version: 1,
+        version: 2,
         lastBuilt: Date.now(),
     };
 }
@@ -165,6 +167,106 @@ export function findParentNode(root, nodeId) {
 }
 
 /**
+ * Find the path from root to a target node (inclusive).
+ * Returns an array of TreeNodes or null if not found.
+ * @param {TreeNode} node
+ * @param {string} nodeId
+ * @returns {TreeNode[]|null}
+ */
+function findNodePath(node, nodeId) {
+    if (!node) return null;
+    if (node.id === nodeId) return [node];
+    for (const child of (node.children || [])) {
+        const path = findNodePath(child, nodeId);
+        if (path) return [node, ...path];
+    }
+    return null;
+}
+
+/**
+ * Parse a template string into an ordered array of section names.
+ * Sections are markdown headings: lines starting with # (or ## etc.).
+ * @param {string} template
+ * @returns {string[]} Section names in order (lowercased, trimmed)
+ */
+export function parseTemplateSections(template) {
+    if (!template || typeof template !== 'string') return [];
+    const sections = [];
+    for (const line of template.split('\n')) {
+        const match = line.match(/^#{1,6}\s+(.+)/);
+        if (match) {
+            sections.push(match[1].trim());
+        }
+    }
+    return sections;
+}
+
+/**
+ * Get the effective (accumulated) template for a node by walking the path
+ * from root to the target node and combining all template sections.
+ * Child templates add new sections to the parent's sections.
+ * If a child re-defines a section that exists in a parent, the child's position wins.
+ * @param {TreeIndex} tree
+ * @param {string} nodeId
+ * @returns {string} The effective template (empty string if no templates defined)
+ */
+export function getEffectiveTemplate(tree, nodeId) {
+    if (!tree || !tree.root || !nodeId) return '';
+    return getEffectiveTemplateForNode(tree.root, nodeId);
+}
+
+/**
+ * Get the effective template for a node within a tree rooted at `root`.
+ * Walks the path from root to the target, accumulating template sections.
+ * @param {TreeNode} root
+ * @param {string} nodeId
+ * @returns {string}
+ */
+export function getEffectiveTemplateForNode(root, nodeId) {
+    if (!root || !nodeId) return '';
+    const path = findNodePath(root, nodeId);
+    if (!path) return '';
+
+    // Accumulate sections preserving order; later occurrences override earlier ones
+    const seen = new Map(); // sectionName -> index in ordered list
+    const ordered = [];     // final ordered section names
+
+    for (const node of path) {
+        const sections = parseTemplateSections(node.template);
+        for (const section of sections) {
+            const key = section.toLowerCase();
+            if (seen.has(key)) {
+                // Child re-defines a parent section: keep the child's position
+                // (the parent's earlier position is already in the list — leave it,
+                //  the child's later occurrence is the one that matters for content)
+                // We don't duplicate; just update the label in case casing differs.
+                const idx = seen.get(key);
+                ordered[idx] = section;
+            } else {
+                seen.set(key, ordered.length);
+                ordered.push(section);
+            }
+        }
+    }
+
+    if (ordered.length === 0) return '';
+    return ordered.map(s => `# ${s}`).join('\n');
+}
+
+/**
+ * Check whether a node (or any of its ancestors) has a template defined.
+ * @param {TreeNode} root
+ * @param {string} nodeId
+ * @returns {boolean}
+ */
+export function hasEffectiveTemplate(root, nodeId) {
+    if (!root || !nodeId) return false;
+    const path = findNodePath(root, nodeId);
+    if (!path) return false;
+    return path.some(node => node.template && node.template.trim().length > 0);
+}
+
+/**
  * Remove a node from the tree. Entries are moved to parent.
  * @param {TreeNode} root
  * @param {string} nodeId
@@ -230,6 +332,8 @@ export function getAllEntryUids(node) {
 /**
  * Build a text representation of the tree for the LLM tool description.
  * This is what the model sees when deciding which branch to search.
+ * Schema nodes (with templates) show their section names even when empty,
+ * so the LLM knows what types are available for new entries.
  * @param {TreeNode} node
  * @param {number} depth
  * @returns {string}
@@ -238,9 +342,16 @@ export function buildTreeDescription(node, depth = 0) {
     if (!node) return '';
     const indent = '  '.repeat(depth);
     const entryCount = (node.entryUids || []).length;
+    const ownSections = parseTemplateSections(node.template);
+
     let desc = `${indent}- [${node.id}] ${node.label || 'Unnamed'}`;
     if (node.summary) desc += `: ${node.summary}`;
-    if (entryCount > 0) desc += ` (${entryCount} entries)`;
+    if (ownSections.length > 0) {
+        desc += ` [schema: ${ownSections.join(', ')}]`;
+    }
+    if (entryCount > 0) {
+        desc += ` (${entryCount} ${entryCount === 1 ? 'entry' : 'entries'})`;
+    }
     desc += '\n';
 
     for (const child of (node.children || [])) {
@@ -313,6 +424,8 @@ export const SETTING_DEFAULTS = {
     sidecarAutoRetrieval: false,
     sidecarContextMessages: 10,
     sidecarMaxInjectionTokens: 4000,
+    sidecarFollowLinks: true,
+    sidecarLinkDepth: 2,
     // LLM-evaluable conditional triggers (evaluated during sidecar retrieval)
     conditionalTriggersEnabled: true,
     // Sidecar post-gen writer
@@ -323,7 +436,210 @@ export const SETTING_DEFAULTS = {
     bookPermissions: {},
     // Compact tool prompts: register one guide tool + one-liner descriptions to save tokens
     compactToolPrompts: true,
+    // User-saved schema templates: { templateName: { nodes: [...] } }
+    savedSchemaTemplates: {},
+    // Entry links for cross-referencing: { lorebookName: { uid: [{ uid, relation }] } }
+    entryLinks: {},
 };
+
+// ─── Schema Starter Templates ────────────────────────────────────
+// Built-in templates users can load to bootstrap a schema tree.
+// Each node has label, template (own sections only), and children.
+// Inheritance is handled at runtime — children inherit parent sections.
+
+/** @typedef {Object} SchemaStarterNode
+ *  @property {string} label
+ *  @property {string} template - Own template sections (not inherited)
+ *  @property {SchemaStarterNode[]} [children]
+ */
+
+export const SCHEMA_STARTERS = {
+    'Fantasy RPG': {
+        nodes: [
+            {
+                label: 'Characters',
+                template: '# Appearance\n# Personality',
+                children: [
+                    { label: 'NPCs', template: '', children: [] },
+                    { label: 'Companions', template: '# Background\n# Speech Patterns\n# Relationship to {{user}}', children: [] },
+                    { label: 'Antagonists', template: '# Motivation\n# Methods\n# Weakness', children: [] },
+                ],
+            },
+            {
+                label: 'Locations',
+                template: '# Description\n# Atmosphere',
+                children: [
+                    { label: 'Settlements', template: '# Government\n# Notable Locations\n# Culture', children: [] },
+                    { label: 'Wilderness', template: '# Terrain\n# Hazards\n# Flora and Fauna', children: [] },
+                    { label: 'Dungeons', template: '# Layout\n# Encounters\n# Loot', children: [] },
+                ],
+            },
+            {
+                label: 'Items',
+                template: '# Description\n# Properties\n# History',
+                children: [
+                    { label: 'Weapons', template: '# Damage Type\n# Special Abilities', children: [] },
+                    { label: 'Armor', template: '# Defense\n# Restrictions', children: [] },
+                    { label: 'Artifacts', template: '# Origin\n# Powers\n# Curse', children: [] },
+                ],
+            },
+            {
+                label: 'Events',
+                template: '# What Happened\n# Participants\n# Consequences',
+                children: [],
+            },
+            {
+                label: 'World Lore',
+                template: '# Overview\n# History\n# Rules',
+                children: [],
+            },
+        ],
+    },
+    'Sci-Fi': {
+        nodes: [
+            {
+                label: 'Characters',
+                template: '# Appearance\n# Personality\n# Role',
+                children: [
+                    { label: 'Crew Members', template: '# Specialization\n# Backstory\n# Relationships', children: [] },
+                    { label: 'Antagonists', template: '# Motivation\n# Resources\n# Weakness', children: [] },
+                ],
+            },
+            {
+                label: 'Planets',
+                template: '# Atmosphere\n# Gravity\n# Population\n# Government',
+                children: [],
+            },
+            {
+                label: 'Starships',
+                template: '# Class\n# Crew Capacity\n# Capabilities\n# Armament',
+                children: [],
+            },
+            {
+                label: 'Factions',
+                template: '# Ideology\n# Structure\n# Territory\n# Key Members',
+                children: [],
+            },
+            {
+                label: 'Technology',
+                template: '# Function\n# Limitations\n# Availability',
+                children: [],
+            },
+            {
+                label: 'Events',
+                template: '# What Happened\n# Participants\n# Consequences\n# Timeline',
+                children: [],
+            },
+        ],
+    },
+    'General': {
+        nodes: [
+            {
+                label: 'People',
+                template: '# Description\n# Personality\n# Background',
+                children: [
+                    { label: 'Main Characters', template: '# Motivation\n# Relationships\n# Arc', children: [] },
+                    { label: 'Supporting Cast', template: '# Role in Story\n# Connection to Protagonist', children: [] },
+                ],
+            },
+            {
+                label: 'Places',
+                template: '# Description\n# Atmosphere',
+                children: [
+                    { label: 'Buildings', template: '# Layout\n# Notable Features\n# History', children: [] },
+                    { label: 'Regions', template: '# Geography\n# Climate\n# Inhabitants', children: [] },
+                ],
+            },
+            {
+                label: 'Things',
+                template: '# Description\n# Significance',
+                children: [],
+            },
+            {
+                label: 'Events',
+                template: '# Summary\n# People Involved\n# Outcome',
+                children: [],
+            },
+        ],
+    },
+};
+
+/**
+ * Get all available schema starter template names (built-in + user-saved).
+ * @returns {string[]}
+ */
+export function getSchemaStarterNames() {
+    const builtIn = Object.keys(SCHEMA_STARTERS);
+    const settings = getSettings();
+    const saved = Object.keys(settings.savedSchemaTemplates || {});
+    return [...builtIn, ...saved];
+}
+
+/**
+ * Get a schema starter template by name (built-in or user-saved).
+ * @param {string} name
+ * @returns {{ nodes: SchemaStarterNode[] } | null}
+ */
+export function getSchemaStarter(name) {
+    if (SCHEMA_STARTERS[name]) return SCHEMA_STARTERS[name];
+    const settings = getSettings();
+    return settings.savedSchemaTemplates?.[name] || null;
+}
+
+/**
+ * Convert a schema starter node tree into live TreeNodes (with IDs).
+ * Does NOT assign entryUids — schema nodes start empty.
+ * @param {SchemaStarterNode[]} starterNodes
+ * @returns {TreeNode[]}
+ */
+export function starterNodesToTreeNodes(starterNodes) {
+    if (!Array.isArray(starterNodes)) return [];
+    return starterNodes.map(sn => ({
+        id: generateNodeId(),
+        label: sn.label || 'Unnamed',
+        summary: '',
+        template: sn.template || '',
+        entryUids: [],
+        children: starterNodesToTreeNodes(sn.children || []),
+        collapsed: false,
+    }));
+}
+
+/**
+ * Save the current tree's structure (nodes + templates, no entries) as a user template.
+ * @param {string} name
+ * @param {TreeNode} rootNode
+ */
+export function saveSchemaTemplate(name, rootNode) {
+    if (!name || !rootNode) return;
+    const settings = getSettings();
+
+    function stripEntries(node) {
+        return {
+            label: node.label || 'Unnamed',
+            template: node.template || '',
+            children: (node.children || []).map(stripEntries),
+        };
+    }
+
+    if (!settings.savedSchemaTemplates) {
+        settings.savedSchemaTemplates = {};
+    }
+    settings.savedSchemaTemplates[name] = { nodes: (rootNode.children || []).map(stripEntries) };
+    saveSettingsDebounced();
+}
+
+/**
+ * Delete a user-saved schema template by name.
+ * @param {string} name
+ */
+export function deleteSchemaTemplate(name) {
+    const settings = getSettings();
+    if (settings.savedSchemaTemplates?.[name]) {
+        delete settings.savedSchemaTemplates[name];
+        saveSettingsDebounced();
+    }
+}
 
 function ensureSettings() {
     if (!extension_settings[EXTENSION_NAME]) {
@@ -388,6 +704,14 @@ function normalizeTree(tree, lorebookName) {
         mutated = true;
     }
 
+    // Migration: v1 → v2 adds template field to all nodes.
+    // normalizeTreeNode (called below) will add the missing field.
+    // We just bump the version here.
+    if (tree.version < 2) {
+        tree.version = 2;
+        mutated = true;
+    }
+
     if (typeof tree.lastBuilt !== 'number' || !Number.isFinite(tree.lastBuilt)) {
         tree.lastBuilt = Date.now();
         mutated = true;
@@ -430,6 +754,10 @@ function normalizeTreeNode(node) {
     }
     if ('_collapsed' in node) {
         delete node._collapsed;
+        mutated = true;
+    }
+    if (typeof node.template !== 'string') {
+        node.template = '';
         mutated = true;
     }
 
@@ -671,4 +999,192 @@ export async function syncTrackerUidsForLorebook(bookName, entriesOrBookData = n
     }
 
     return normalized;
+}
+
+// ─── Entry Links (Cross-References) ────────────────────────────────────
+
+/**
+ * Get all links from an entry in a lorebook.
+ * @param {string} bookName
+ * @param {number} uid
+ * @returns {Array<{uid: number, relation: string}>}
+ */
+export function getEntryLinks(bookName, uid) {
+    ensureSettings();
+    const links = extension_settings[EXTENSION_NAME].entryLinks[bookName];
+    if (!links || !links[uid]) return [];
+    return [...links[uid]];
+}
+
+/**
+ * Set the links for an entry in a lorebook.
+ * @param {string} bookName
+ * @param {number} uid
+ * @param {Array<{uid: number, relation: string}>} links
+ */
+export function setEntryLinks(bookName, uid, links) {
+    ensureSettings();
+    if (!extension_settings[EXTENSION_NAME].entryLinks[bookName]) {
+        extension_settings[EXTENSION_NAME].entryLinks[bookName] = {};
+    }
+    extension_settings[EXTENSION_NAME].entryLinks[bookName][uid] = links;
+    saveSettingsDebounced();
+}
+
+/**
+ * Add a single link from one entry to another.
+ * @param {string} bookName
+ * @param {number} fromUid - The entry that is linking
+ * @param {number} toUid - The entry being linked to
+ * @param {string} relation - The type of relationship (e.g., "lives_in", "knows")
+ */
+export function addEntryLink(bookName, fromUid, toUid, relation = 'related') {
+    ensureSettings();
+    if (!extension_settings[EXTENSION_NAME].entryLinks[bookName]) {
+        extension_settings[EXTENSION_NAME].entryLinks[bookName] = {};
+    }
+    const links = extension_settings[EXTENSION_NAME].entryLinks[bookName];
+    if (!links[fromUid]) {
+        links[fromUid] = [];
+    }
+
+    // Check if link already exists
+    const existing = links[fromUid].find(l => l.uid === toUid);
+    if (existing) {
+        existing.relation = relation;
+    } else {
+        links[fromUid].push({ uid: toUid, relation });
+    }
+
+    // Auto-create back-link for bidirectional navigation
+    if (!links[toUid]) {
+        links[toUid] = [];
+    }
+    const backExisting = links[toUid].find(l => l.uid === fromUid);
+    const backRelation = getInverseRelation(relation);
+    if (backExisting) {
+        backExisting.relation = backRelation;
+    } else {
+        links[toUid].push({ uid: fromUid, relation: backRelation });
+    }
+
+    saveSettingsDebounced();
+}
+
+/**
+ * Remove a link from an entry.
+ * @param {string} bookName
+ * @param {number} fromUid
+ * @param {number} toUid
+ */
+export function removeEntryLink(bookName, fromUid, toUid) {
+    ensureSettings();
+    const links = extension_settings[EXTENSION_NAME].entryLinks[bookName];
+    if (!links) return;
+
+    // Remove forward link
+    if (links[fromUid]) {
+        links[fromUid] = links[fromUid].filter(l => l.uid !== toUid);
+        if (links[fromUid].length === 0) {
+            delete links[fromUid];
+        }
+    }
+
+    // Remove back-link
+    if (links[toUid]) {
+        links[toUid] = links[toUid].filter(l => l.uid !== fromUid);
+        if (links[toUid].length === 0) {
+            delete links[toUid];
+        }
+    }
+
+    saveSettingsDebounced();
+}
+
+/**
+ * Get all entries that link TO a given UID (reverse lookup).
+ * @param {string} bookName
+ * @param {number} uid
+ * @returns {Array<{uid: number, relation: string}>} Entries that link to this UID
+ */
+export function getBackLinks(bookName, uid) {
+    ensureSettings();
+    const links = extension_settings[EXTENSION_NAME].entryLinks[bookName];
+    if (!links) return [];
+
+    const backLinks = [];
+    for (const [fromUid, linkList] of Object.entries(links)) {
+        for (const link of linkList) {
+            if (link.uid === uid) {
+                backLinks.push({ uid: Number(fromUid), relation: link.relation });
+            }
+        }
+    }
+    return backLinks;
+}
+
+/**
+ * Remove all links referencing a UID (used when an entry is deleted).
+ * @param {string} bookName
+ * @param {number} uid
+ */
+export function removeAllLinksToEntry(bookName, uid) {
+    ensureSettings();
+    const links = extension_settings[EXTENSION_NAME].entryLinks[bookName];
+    if (!links) return;
+
+    // Remove this UID from all link arrays
+    for (const fromUid in links) {
+        if (links[fromUid]) {
+            links[fromUid] = links[fromUid].filter(l => l.uid !== uid);
+            if (links[fromUid].length === 0) {
+                delete links[fromUid];
+            }
+        }
+    }
+
+    // Delete this UID's own links
+    if (links[uid]) {
+        delete links[uid];
+    }
+
+    saveSettingsDebounced();
+}
+
+/**
+ * Ensure the entryLinks structure is initialized.
+ * Called by ensureSettings().
+ */
+export function ensureLinkSettings() {
+    if (!extension_settings[EXTENSION_NAME].entryLinks) {
+        extension_settings[EXTENSION_NAME].entryLinks = {};
+    }
+}
+
+/**
+ * Get the inverse relation for bidirectional links.
+ * @param {string} relation
+ * @returns {string}
+ */
+function getInverseRelation(relation) {
+    const inverseMap = {
+        'lives_in': 'resident_of',
+        'works_at': 'employer_of',
+        'knows': 'known_by',
+        'friend_of': 'friend_of',
+        'enemy_of': 'enemy_of',
+        'parent_of': 'child_of',
+        'child_of': 'parent_of',
+        'spouse_of': 'spouse_of',
+        'sibling_of': 'sibling_of',
+        'mentor_of': 'student_of',
+        'student_of': 'mentor_of',
+        'rival_of': 'rival_of',
+        'ally_of': 'ally_of',
+        'owns': 'owned_by',
+        'member_of': 'has_member',
+        'located_in': 'contains',
+        'neighbor_of': 'neighbor_of',
+    };
+    return inverseMap[relation] || 'related_to';
 }

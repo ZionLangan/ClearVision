@@ -5,7 +5,13 @@
  * lorebook grows and the existing structure no longer fits.
  */
 
-import { getTree, findNodeById, getSettings, getAllEntryUids } from '../tree-store.js';
+import {
+    getTree,
+    findNodeById,
+    getSettings,
+    getAllEntryUids,
+    setTreeNodeTemplate,
+} from '../tree-store.js';
 import { moveEntry, createCategory, listNodeEntries } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
 
@@ -22,11 +28,12 @@ export function getDefinition() {
     return {
         name: TOOL_NAME,
         displayName: 'TunnelVision Reorganize',
-        description: `Reorganize the knowledge tree structure. Use this to move entries between categories or create new categories when the existing tree structure doesn't adequately organize the stored knowledge.
+        description: `Reorganize the knowledge tree structure. Use this to move entries between categories, create new categories, or set template schemas for categories. Templates define the structure that entries under that category should follow.
 
 Actions:
 - "move": Move an entry from its current node to a different node
-- "create_category": Create a new category node under a parent
+- "create_category": Create a new category node under a parent (optional template for entries under this node)
+- "set_template": Set or update a template on an existing node
 - "list_entries": List entries in a specific node (to find UIDs for moving)
 
 Available lorebooks:
@@ -40,7 +47,7 @@ ${bookDesc}`,
                 },
                 action: {
                     type: 'string',
-                    enum: ['move', 'create_category', 'list_entries'],
+                    enum: ['move', 'create_category', 'set_template', 'list_entries'],
                     description: 'The reorganization action to perform.',
                 },
                 uid: {
@@ -55,9 +62,13 @@ ${bookDesc}`,
                     type: 'string',
                     description: 'Name for the new category (required for "create_category").',
                 },
+                template: {
+                    type: 'string',
+                    description: 'Optional template (markdown section headings) for entries under this category. Example: "# Appearance\\n# Personality".',
+                },
                 node_id: {
                     type: 'string',
-                    description: 'Node ID to list entries from (required for "list_entries").',
+                    description: 'Node ID to list entries from (required for "list_entries"), or node to set template on (required for "set_template").',
                 },
             },
             required: ['lorebook', 'action'],
@@ -116,8 +127,32 @@ ${bookDesc}`,
                     }
                 }
 
+                case 'set_template': {
+                    if (!args.node_id) {
+                        return 'set_template requires a "node_id" to set the template on.';
+                    }
+                    const tree = getTree(lorebook);
+                    if (!tree?.root) {
+                        return 'No tree found for this lorebook.';
+                    }
+                    const node = findNodeById(tree.root, args.node_id);
+                    if (!node) {
+                        return `Node "${args.node_id}" not found in the tree.`;
+                    }
+                    if (node.id === tree.root.id) {
+                        return 'Cannot set template on the root node. Templates belong on category nodes.';
+                    }
+                    try {
+                        setTreeNodeTemplate(lorebook, node.id, args.template || '');
+                        return `Set template on "${node.label}" (ID: ${node.id}).${args.template ? '' : ' (template cleared)'}`;
+                    } catch (e) {
+                        console.error('[TunnelVision] Set template failed:', e);
+                        return `Failed to set template: ${e.message}`;
+                    }
+                }
+
                 default:
-                    return `Unknown action "${args.action}". Use: move, create_category, or list_entries.`;
+                    return `Unknown action "${args.action}". Use: move, create_category, set_template, or list_entries.`;
             }
         },
         formatMessage: async (args) => {

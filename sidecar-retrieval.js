@@ -21,6 +21,8 @@ import {
     findNodeById,
     getAllEntryUids,
     getSettings,
+    getEntryLinks,
+    getBackLinks,
 } from './tree-store.js';
 import { getReadableBooks } from './tool-registry.js';
 import { hasEvaluableConditions, separateConditions, mapSelectiveLogic, describeSelectiveLogic, CONDITION_DESCRIPTIONS, CONDITION_LABELS, rollKeywordProbability, formatCondition } from './conditions.js';
@@ -230,10 +232,13 @@ function buildConditionalSection(conditionalEntries) {
 
 /**
  * Resolve node IDs to entry content across all active lorebooks.
+ * Optionally follows bidirectional links to include related entries.
  * @param {string[]} nodeIds
+ * @param {boolean} followLinks - Whether to follow entry links
+ * @param {number} linkDepth - Maximum link depth to follow
  * @returns {Promise<string>}
  */
-async function resolveNodeContent(nodeIds) {
+async function resolveNodeContent(nodeIds, followLinks = false, linkDepth = 2) {
     const results = [];
     const seenEntries = new Set();
 
@@ -259,6 +264,19 @@ async function resolveNodeContent(nodeIds) {
 
                 const title = entry.comment || entry.key?.[0] || `Entry #${uid}`;
                 results.push(`[${bookName} | ${title}]\n${entry.content}`);
+
+                // Follow links if enabled
+                if (followLinks && linkDepth > 0) {
+                    const linkedEntries = await collectLinkedEntries(bookName, uid, seenEntries, linkDepth);
+                    for (const linked of linkedEntries) {
+                        const linkedEntryKey = `${bookName}:${linked.uid}`;
+                        if (seenEntries.has(linkedEntryKey)) continue;
+                        seenEntries.add(linkedEntryKey);
+
+                        const depthIndicator = linked.depth > 0 ? ` [linked, depth ${linked.depth}]` : '';
+                        results.push(`[${bookName} | ${linked.title}${depthIndicator}]\n${linked.content}`);
+                    }
+                }
             }
         }
     }
@@ -277,6 +295,57 @@ function findEntryByUid(entries, uid) {
         if (entries[key].uid === uid) return entries[key];
     }
     return null;
+}
+
+/**
+ * Collect linked entries from a starting entry, following links up to a specified depth.
+ * @param {string} bookName - Lorebook name
+ * @param {number} startUid - Starting entry UID
+ * @param {Set<string>} seenEntries - Set of "bookName:uid" strings to avoid duplicates
+ * @param {number} maxDepth - Maximum link depth to follow
+ * @param {number} currentDepth - Current depth (used recursively)
+ * @returns {Promise<Array<{ uid: number, title: string, content: string, depth: number }>>}
+ */
+async function collectLinkedEntries(bookName, startUid, seenEntries, maxDepth, currentDepth = 0) {
+    if (currentDepth >= maxDepth) return [];
+
+    const entryKey = `${bookName}:${startUid}`;
+    if (seenEntries.has(entryKey)) return [];
+    seenEntries.add(entryKey);
+
+    const bookData = await loadWorldInfo(bookName);
+    if (!bookData?.entries) return [];
+
+    const entry = findEntryByUid(bookData.entries, startUid);
+    if (!entry?.content || entry.disable) return [];
+
+    const results = [{
+        uid: startUid,
+        title: entry.comment || entry.key?.[0] || `Entry #${startUid}`,
+        content: entry.content,
+        depth: currentDepth,
+    }];
+
+    // Get outgoing links and back-links
+    const outgoingLinks = getEntryLinks(bookName, startUid);
+    const backLinks = getBackLinks(bookName, startUid);
+
+    // Collect all linked UIDs (deduplicated)
+    const linkedUids = new Set();
+    for (const link of outgoingLinks) {
+        linkedUids.add(link.uid);
+    }
+    for (const link of backLinks) {
+        linkedUids.add(link.uid);
+    }
+
+    // Recursively follow links
+    for (const linkedUid of linkedUids) {
+        const linkedResults = await collectLinkedEntries(bookName, linkedUid, seenEntries, maxDepth, currentDepth + 1);
+        results.push(...linkedResults);
+    }
+
+    return results;
 }
 
 // ─── Sidecar Prompt ──────────────────────────────────────────────
@@ -481,7 +550,9 @@ export async function runSidecarRetrieval() {
         let injectionParts = [];
 
         if (nodeIds.length > 0) {
-            const nodeContent = await resolveNodeContent(nodeIds);
+            const followLinks = settings.sidecarFollowLinks !== false;
+            const linkDepth = settings.sidecarLinkDepth || 2;
+            const nodeContent = await resolveNodeContent(nodeIds, followLinks, linkDepth);
             if (nodeContent.trim()) {
                 injectionParts.push(nodeContent);
             }

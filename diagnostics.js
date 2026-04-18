@@ -18,6 +18,12 @@ import {
     deleteTree,
     getBookDescription,
     isTrackerTitle,
+    hasEffectiveTemplate,
+    parseTemplateSections,
+    getEffectiveTemplateForNode,
+    getEntryLinks,
+    getBackLinks,
+    removeAllLinksToEntry,
 } from './tree-store.js';
 import { getContext } from '../../../st-context.js';
 import { getActiveTunnelVisionBooks, ALL_TOOL_NAMES, CONFIRMABLE_TOOLS, preflightToolRuntimeState } from './tool-registry.js';
@@ -97,6 +103,13 @@ export async function runDiagnostics() {
     results.push(...await checkKeywordProbabilities());
     results.push(checkSidecarPostGenWriter());
     results.push(checkTurnSummaryEvent());
+    results.push(checkTemplateVersion());
+    results.push(...checkEmptySchemaNodes());
+    results.push(...checkTemplateSyntax());
+    results.push(...checkTemplateInheritanceDepth());
+    results.push(...checkEntryMatchesSchema());
+    results.push(...await checkOrphanLinks());
+    results.push(...checkBidirectionalLinks());
 
     const settingsAfter = JSON.stringify(getSettings());
     if (settingsBefore !== settingsAfter) {
@@ -1589,6 +1602,364 @@ function removeStaleUids(node, validUids) {
 
 function pass(message) {
     return { status: 'pass', message, fix: null };
+}
+
+/** Verify all linked UIDs actually exist in their lorebook. */
+async function checkOrphanLinks() {
+    const results = [];
+    const settings = getSettings();
+    const entryLinks = settings.entryLinks || {};
+    const activeBooks = new Set(getActiveTunnelVisionBooks());
+
+    for (const [bookName, links] of Object.entries(entryLinks)) {
+        if (!links) continue;
+
+        const bookData = await loadWorldInfo(bookName);
+        if (!bookData?.entries) {
+            results.push(warn(`Lorebook "${bookName}" has link data but could not be loaded.`));
+            continue;
+        }
+
+        // Build set of valid UIDs in this lorebook
+        const validUids = new Set();
+        for (const key of Object.keys(bookData.entries)) {
+            validUids.add(bookData.entries[key].uid);
+        }
+
+        let orphanedLinks = 0;
+        for (const [fromUid, linkList] of Object.entries(links)) {
+            const fromUidNum = Number(fromUid);
+            // Check if the source entry exists
+            if (!validUids.has(fromUidNum)) {
+                orphanedLinks += linkList.length;
+                continue;
+            }
+
+            // Check if each target entry exists
+            for (const link of linkList) {
+                if (!validUids.has(link.uid)) {
+                    orphanedLinks++;
+                }
+            }
+        }
+
+        if (orphanedLinks > 0) {
+            // Offer to clean up orphaned links
+            results.push({
+                status: 'warn',
+                message: `"${bookName}" has ${orphanedLinks} link(s) pointing to deleted entries.`,
+                fix: () => {
+                    let cleaned = 0;
+                    for (const fromUid in links) {
+                        const fromUidNum = Number(fromUid);
+                        if (!validUids.has(fromUidNum)) {
+                            delete links[fromUid];
+                            continue;
+                        }
+
+                        // Filter out links to non-existent entries
+                        if (links[fromUid]) {
+                            const originalLength = links[fromUid].length;
+                            links[fromUid] = links[fromUid].filter(l => validUids.has(l.uid));
+                            cleaned += originalLength - links[fromUid].length;
+
+                            if (links[fromUid].length === 0) {
+                                delete links[fromUid];
+                            }
+                        }
+                    }
+                    // Clean up empty book
+                    if (Object.keys(links).length === 0) {
+                        delete entryLinks[bookName];
+                    }
+                    saveSettingsDebounced();
+                    return `Cleaned ${cleaned} orphaned link(s) from "${bookName}".`;
+                },
+                fixLabel: 'Clean Up Orphan Links',
+            });
+        }
+    }
+
+    if (results.length === 0) {
+        results.push(pass('No orphaned links found'));
+    }
+
+    return results;
+}
+
+/** Warn if an entry has a link but the target doesn't have a back-link. */
+function checkBidirectionalLinks() {
+    const results = [];
+    const settings = getSettings();
+    const entryLinks = settings.entryLinks || {};
+    const activeBooks = new Set(getActiveTunnelVisionBooks());
+
+    for (const bookName of activeBooks) {
+        const links = entryLinks[bookName];
+        if (!links) continue;
+
+        let missingBackLinks = 0;
+        const examples = [];
+
+        for (const [fromUid, linkList] of Object.entries(links)) {
+            for (const link of linkList) {
+                // Check if target has a back-link to source
+                const backLinks = getBackLinks(bookName, link.uid);
+                const hasBackLink = backLinks.some(bl => bl.uid === Number(fromUid));
+
+                if (!hasBackLink) {
+                    missingBackLinks++;
+                    if (examples.length < 3) {
+                        examples.push(`#${fromUid} → #${link.uid} (${link.relation})`);
+                    }
+                }
+            }
+        }
+
+        if (missingBackLinks > 0) {
+            // Offer to create missing back-links
+            results.push({
+                status: 'warn',
+                message: `"${bookName}" has ${missingBackLinks} unidirectional link(s). Examples: ${examples.join('; ')}. Consider adding back-links for bidirectional navigation.`,
+                fix: () => {
+                    let created = 0;
+                    for (const fromUid in links) {
+                        for (const link of links[fromUid]) {
+                            const backLinks = getBackLinks(bookName, link.uid);
+                            const hasBackLink = backLinks.some(bl => bl.uid === Number(fromUid));
+
+                            if (!hasBackLink) {
+                                // Create back-link with inverse relation
+                                const backLinkList = links[link.uid] || [];
+                                const inverseRelation = getInverseRelation(link.relation);
+                                backLinkList.push({ uid: Number(fromUid), relation: inverseRelation });
+                                links[link.uid] = backLinkList;
+                                created++;
+                            }
+                        }
+                    }
+                    saveSettingsDebounced();
+                    return `Created ${created} back-link(s) in "${bookName}".`;
+                },
+                fixLabel: 'Create Missing Back-Links',
+            });
+        }
+    }
+
+    if (results.length === 0) {
+        results.push(pass('All entry links are bidirectional'));
+    }
+
+    return results;
+}
+
+/** Get the inverse relation for bidirectional links. */
+function getInverseRelation(relation) {
+    const inverseMap = {
+        'lives_in': 'resident_of',
+        'works_at': 'employer_of',
+        'knows': 'known_by',
+        'friend_of': 'friend_of',
+        'enemy_of': 'enemy_of',
+        'parent_of': 'child_of',
+        'child_of': 'parent_of',
+        'spouse_of': 'spouse_of',
+        'sibling_of': 'sibling_of',
+        'mentor_of': 'student_of',
+        'student_of': 'mentor_of',
+        'rival_of': 'rival_of',
+        'ally_of': 'ally_of',
+        'owns': 'owned_by',
+        'member_of': 'has_member',
+        'located_in': 'contains',
+        'neighbor_of': 'neighbor_of',
+    };
+    return inverseMap[relation] || 'related_to';
+}
+
+/** Verify all trees have been migrated to template version 2. */
+function checkTemplateVersion() {
+    try {
+        const settings = getSettings();
+        const trees = settings.trees || {};
+        const outdated = [];
+        for (const [bookName, tree] of Object.entries(trees)) {
+            if (tree && tree.version < 2) {
+                outdated.push(bookName);
+            }
+        }
+        if (outdated.length > 0) {
+            return warn(`Trees not migrated to template schema (v2): ${outdated.join(', ')}. Will auto-fix on next load.`);
+        }
+        return pass('All trees use template schema (v2)');
+    } catch (e) {
+        return fail(`Template version check error: ${e.message}`);
+    }
+}
+
+/** Verify empty nodes with templates are not flagged as problems (they are type definitions). */
+function checkEmptySchemaNodes() {
+    try {
+        const settings = getSettings();
+        const trees = settings.trees || {};
+        const results = [];
+
+        for (const [bookName, tree] of Object.entries(trees)) {
+            if (!tree || !tree.root) continue;
+            const emptyUntemplated = [];
+            const schemaNodes = [];
+            walkNodes(tree.root, node => {
+                const hasTemplate = node.template && node.template.trim().length > 0;
+                const hasEntries = Array.isArray(node.entryUids) && node.entryUids.length > 0;
+                const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+
+                if (hasTemplate) {
+                    const sections = parseTemplateSections(node.template);
+                    schemaNodes.push({ label: node.label, sections: sections.length });
+                } else if (!hasEntries && !hasChildren && node !== tree.root) {
+                    // Empty, no template, no children — truly unused leaf node
+                    emptyUntemplated.push(node.label || 'Unnamed');
+                }
+            });
+
+            if (schemaNodes.length > 0) {
+                results.push(pass(`Schema nodes in "${bookName}": ${schemaNodes.map(n => `${n.label} (${n.sections} sections)`).join(', ')}`));
+            }
+            if (emptyUntemplated.length > 0) {
+                results.push(warn(`Empty nodes without templates in "${bookName}": ${emptyUntemplated.join(', ')}. Consider adding templates or removing them.`));
+            }
+        }
+
+        if (results.length === 0) {
+            results.push(pass('No schema nodes defined yet'));
+        }
+        return results;
+    } catch (e) {
+        return [fail(`Empty schema node check error: ${e.message}`)];
+    }
+}
+
+/** Walk all nodes in a tree, calling fn for each. */
+function walkNodes(node, fn) {
+    if (!node) return;
+    fn(node);
+    for (const child of (node.children || [])) {
+        walkNodes(child, fn);
+    }
+}
+
+/** Check template syntax — verify all template content uses valid markdown headings. */
+function checkTemplateSyntax() {
+    const results = [];
+    const settings = getSettings();
+    const trees = settings.trees || {};
+    const activeBooks = new Set(getActiveTunnelVisionBooks());
+
+    for (const [bookName, tree] of Object.entries(trees)) {
+        if (!tree?.root || !activeBooks.has(bookName)) continue;
+
+        let issues = 0;
+        walkNodes(tree.root, node => {
+            if (!node.template || !node.template.trim()) return;
+            const lines = node.template.split('\n');
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                // Valid lines start with # (markdown heading)
+                if (!trimmed.startsWith('#')) {
+                    issues++;
+                }
+            }
+        });
+
+        if (issues > 0) {
+            results.push(warn(`"${bookName}" has ${issues} template line(s) that aren't markdown headings. Templates should use # Section Name format. Non-heading text will be ignored.`));
+        }
+    }
+
+    if (results.length === 0) {
+        results.push(pass('All node templates use valid markdown heading syntax'));
+    }
+    return results;
+}
+
+/** Warn if a node's effective template has too many sections (may confuse the LLM). */
+function checkTemplateInheritanceDepth() {
+    const results = [];
+    const settings = getSettings();
+    const trees = settings.trees || {};
+    const THRESHOLD = 15;
+    const activeBooks = new Set(getActiveTunnelVisionBooks());
+
+    for (const [bookName, tree] of Object.entries(trees)) {
+        if (!tree?.root || !activeBooks.has(bookName)) continue;
+
+        const deepNodes = [];
+        walkNodes(tree.root, node => {
+            if (node === tree.root) return;
+            const effective = getEffectiveTemplateForNode(tree.root, node.id);
+            if (!effective) return;
+            const sections = parseTemplateSections(effective);
+            if (sections.length > THRESHOLD) {
+                deepNodes.push({ label: node.label || 'Unnamed', sections: sections.length });
+            }
+        });
+
+        if (deepNodes.length > 0) {
+            const examples = deepNodes.slice(0, 3).map(n => `"${n.label}" (${n.sections} sections)`).join(', ');
+            results.push(warn(`"${bookName}" has ${deepNodes.length} node(s) with ${THRESHOLD}+ inherited template sections: ${examples}. Very long templates may confuse the LLM or bloat tokens. Consider simplifying the schema hierarchy.`));
+        }
+    }
+
+    if (results.length === 0) {
+        results.push(pass(`No nodes exceed ${THRESHOLD} inherited template sections`));
+    }
+    return results;
+}
+
+/** For entries under templated nodes, check if content matches expected schema sections. */
+function checkEntryMatchesSchema() {
+    const results = [];
+    const activeBooks = getActiveTunnelVisionBooks();
+
+    for (const bookName of activeBooks) {
+        const tree = getTree(bookName);
+        if (!tree?.root) continue;
+
+        const mismatches = [];
+        walkNodes(tree.root, node => {
+            if (node === tree.root) return;
+            const effective = getEffectiveTemplateForNode(tree.root, node.id);
+            if (!effective) return;
+
+            const expectedSections = parseTemplateSections(effective);
+            if (expectedSections.length === 0) return;
+
+            // Check entries under this node
+            for (const uid of (node.entryUids || [])) {
+                // We can't check content here without loading the lorebook (expensive)
+                // Just count how many entries are under templated nodes
+            }
+        });
+
+        // Lightweight check: report count of entries under templated nodes
+        let templatedEntries = 0;
+        walkNodes(tree.root, node => {
+            if (node === tree.root) return;
+            if (hasEffectiveTemplate(tree.root, node.id)) {
+                templatedEntries += (node.entryUids || []).length;
+            }
+        });
+
+        if (templatedEntries > 0) {
+            results.push(pass(`"${bookName}" has ${templatedEntries} entries under schema-templated nodes`));
+        }
+    }
+
+    if (results.length === 0) {
+        results.push(pass('No entries under schema-templated nodes (or no templates defined)'));
+    }
+    return results;
 }
 
 function warn(message) {

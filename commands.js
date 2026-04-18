@@ -144,6 +144,61 @@ function registerSlashCommands() {
         ],
         returns: 'empty string',
     }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'tv-set-template',
+        callback: wrapCallback(handleSetTemplate),
+        helpString: 'Set a schema template on a TunnelVision tree node.',
+        namedArgumentList: [
+            SlashCommandArgument.fromProps({
+                name: 'node_id',
+                description: 'Tree node ID to set template on',
+                typeList: [ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+            SlashCommandArgument.fromProps({
+                name: 'template',
+                description: 'Template markdown sections (e.g. "# Appearance\\n# Personality")',
+                typeList: [ARGUMENT_TYPE.STRING],
+                isRequired: false,
+            }),
+        ],
+        returns: 'empty string',
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'tv-links',
+        callback: wrapCallback(handleLinks),
+        helpString: 'Manage entry links in TunnelVision.',
+        namedArgumentList: [
+            SlashCommandArgument.fromProps({
+                name: 'uid',
+                description: 'Entry UID to manage links for',
+                typeList: [ARGUMENT_TYPE.NUMBER],
+                isRequired: true,
+            }),
+            SlashCommandArgument.fromProps({
+                name: 'action',
+                description: 'Action: "list", "add", or "remove"',
+                typeList: [ARGUMENT_TYPE.STRING],
+                isRequired: false,
+                defaultValue: 'list',
+            }),
+            SlashCommandArgument.fromProps({
+                name: 'link_uid',
+                description: 'Target entry UID (for add/remove)',
+                typeList: [ARGUMENT_TYPE.NUMBER],
+                isRequired: false,
+            }),
+            SlashCommandArgument.fromProps({
+                name: 'relation',
+                description: 'Relationship type (e.g. "lives_in", "knows")',
+                typeList: [ARGUMENT_TYPE.STRING],
+                isRequired: false,
+            }),
+        ],
+        returns: 'empty string',
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +309,49 @@ async function handleIngestCommand(_namedArgs, unnamedArg, { activeBooks }) {
     }
 
     await handleIngest(targetLorebook, getContextMessages());
+}
+
+async function handleSetTemplate(namedArgs, _unnamedArg, { activeBooks }) {
+    const targetLorebook = resolveCurrentLorebook(activeBooks);
+    const nodeId = namedArgs.node_id;
+    const template = namedArgs.template || '';
+
+    if (!nodeId) {
+        toastr.error('node_id is required for /tv-set-template', 'TunnelVision');
+        return;
+    }
+
+    const prompt = buildCommandPrompt({
+        command: 'set_template',
+        arg: { nodeId, template }
+    }, getContextMessages(), activeBooks, targetLorebook);
+
+    toastr.info(`Setting template on node "${nodeId}"...`, 'TunnelVision');
+    await generateQuietPrompt(prompt);
+    toastr.success('Template updated.', 'TunnelVision');
+}
+
+async function handleLinks(namedArgs, _unnamedArg, { activeBooks }) {
+    const targetLorebook = resolveCurrentLorebook(activeBooks);
+    const uid = namedArgs.uid;
+    const action = namedArgs.action || 'list';
+    const linkUid = namedArgs.link_uid;
+    const relation = namedArgs.relation;
+
+    if (!uid) {
+        toastr.error('uid is required for /tv-links', 'TunnelVision');
+        return;
+    }
+
+    const prompt = buildCommandPrompt({
+        command: 'links',
+        arg: { uid, action, linkUid, relation }
+    }, getContextMessages(), activeBooks, targetLorebook);
+
+    const actionText = action === 'list' ? 'Listing links' : action === 'add' ? 'Adding link' : 'Removing link';
+    toastr.info(`${actionText} for entry ${uid}...`, 'TunnelVision');
+    await generateQuietPrompt(prompt);
+    toastr.success('Links updated.', 'TunnelVision');
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +480,46 @@ function buildCommandPrompt({ command, arg }, contextMessages, activeBooks, targ
                 `Then call TunnelVision_MergeSplit with action "split", uid, keep_content, new_content, and new_title. ` +
                 `Each resulting entry should cover one focused topic.]`
             );
+        }
+        case 'set_template': {
+            const { nodeId, template } = arg;
+            const templateText = template ? `"${template}"` : '(clear template)';
+            return (
+                `[INSTRUCTION: You MUST call TunnelVision_Reorganize with action "set_template" this turn. ` +
+                lorebookInstruction +
+                `Set the template on node "${nodeId}" to ${templateText}. ` +
+                `Use node_id: "${nodeId}", action: "set_template", and template: "${template || ''}". ` +
+                `Templates define the section structure that entries under this category should follow.]`
+            );
+        }
+        case 'links': {
+            const { uid, action, linkUid, relation } = arg;
+            if (action === 'list') {
+                return (
+                    `[INSTRUCTION: List the links for entry UID ${uid}. ` +
+                    lorebookInstruction +
+                    `Search for this entry to understand what it is, then report its linked entries and relationships.]`
+                );
+            } else if (action === 'add') {
+                return (
+                    `[INSTRUCTION: You MUST call TunnelVision_Update this turn. ` +
+                    lorebookInstruction +
+                    `First search to understand entry UID ${uid} and UID ${linkUid}. ` +
+                    `Then call TunnelVision_Update for UID ${uid} with a new links array that includes ` +
+                    `{ uid: ${linkUid}, relation: "${relation}" }. ` +
+                    `Preserve any existing links when adding this one.]`
+                );
+            } else if (action === 'remove') {
+                return (
+                    `[INSTRUCTION: You MUST call TunnelVision_Update this turn. ` +
+                    lorebookInstruction +
+                    `First search for entry UID ${uid} to see its current links. ` +
+                    `Then call TunnelVision_Update for UID ${uid} with a links array that excludes ` +
+                    `the link to UID ${linkUid} with relation "${relation}". ` +
+                    `Preserve all other links.]`
+                );
+            }
+            return `[INSTRUCTION: Manage links for entry UID ${uid}. Action: ${action}]`;
         }
         default:
             return '';

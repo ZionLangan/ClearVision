@@ -33,7 +33,22 @@ import {
     listConnectionProfiles,
     getBookPermission,
     setBookPermission,
+    getEffectiveTemplateForNode,
+    hasEffectiveTemplate,
+    parseTemplateSections,
+    getSchemaStarterNames,
+    getSchemaStarter,
+    starterNodesToTreeNodes,
+    saveSchemaTemplate,
+    deleteSchemaTemplate,
+    SCHEMA_STARTERS,
     SETTING_DEFAULTS,
+    getEntryLinks,
+    getBackLinks,
+    addEntryLink,
+    removeEntryLink,
+    getEntryLinksData,
+    setEntryLinksData,
 } from './tree-store.js';
 import { buildTreeFromMetadata, buildTreeWithLLM, generateSummariesForTree, ingestChatMessages } from './tree-builder.js';
 import { registerTools, unregisterTools, getDefaultToolDescriptions, stripDynamicContent } from './tool-registry.js';
@@ -184,6 +199,8 @@ export function bindUIEvents() {
     $('#tv_sidecar_auto_retrieval').on('change', onSidecarAutoRetrievalToggle);
     $('#tv_sidecar_context_messages').on('input', onSidecarContextMessagesChange);
     $('#tv_sidecar_max_injection').on('input', onSidecarMaxInjectionChange);
+    $('#tv_sidecar_follow_links').on('change', onSidecarFollowLinksToggle);
+    $('#tv_sidecar_link_depth').on('input', onSidecarLinkDepthChange);
     $('#tv_conditional_triggers').on('change', function () {
         const settings = getSettings();
         settings.conditionalTriggersEnabled = $(this).prop('checked');
@@ -959,6 +976,18 @@ function onSidecarMaxInjectionChange() {
     saveSettingsDebounced();
 }
 
+function onSidecarFollowLinksToggle() {
+    const settings = getSettings();
+    settings.sidecarFollowLinks = $(this).prop('checked');
+    saveSettingsDebounced();
+}
+
+function onSidecarLinkDepthChange() {
+    const settings = getSettings();
+    settings.sidecarLinkDepth = Number($(this).val()) || 2;
+    saveSettingsDebounced();
+}
+
 function onSidecarPostGenWriterToggle() {
     const settings = getSettings();
     settings.sidecarPostGenWriter = $(this).prop('checked');
@@ -1020,6 +1049,8 @@ function populateConnectionProfiles() {
     $('#tv_sidecar_retrieval_fields').toggle(autoRetrieval);
     $('#tv_sidecar_context_messages').val(settings.sidecarContextMessages ?? 10);
     $('#tv_sidecar_max_injection').val(settings.sidecarMaxInjectionTokens ?? 4000);
+    $('#tv_sidecar_follow_links').prop('checked', settings.sidecarFollowLinks !== false);
+    $('#tv_sidecar_link_depth').val(settings.sidecarLinkDepth ?? 2);
 
     // Sync conditional triggers toggle
     $('#tv_conditional_triggers').prop('checked', settings.conditionalTriggersEnabled !== false);
@@ -1075,6 +1106,8 @@ async function onOpenTreeEditor() {
         </div>
         <div class="tv-popup-toolbar-right">
             <button class="tv-popup-btn" id="tv_popup_add_cat" title="Add category"><i class="fa-solid fa-folder-plus"></i> Add Category</button>
+            <button class="tv-popup-btn" id="tv_popup_load_schema" title="Load schema template"><i class="fa-solid fa-table-cells"></i> Load Schema</button>
+            <button class="tv-popup-btn" id="tv_popup_save_schema" title="Save tree as template"><i class="fa-solid fa-bookmark"></i> Save as Template</button>
             <button class="tv-popup-btn" id="tv_popup_regen" title="Regenerate summaries"><i class="fa-solid fa-rotate"></i> Regen Summaries</button>
             <button class="tv-popup-btn" id="tv_popup_export" title="Export"><i class="fa-solid fa-file-export"></i></button>
             <button class="tv-popup-btn" id="tv_popup_import" title="Import"><i class="fa-solid fa-file-import"></i></button>
@@ -1158,6 +1191,14 @@ async function onOpenTreeEditor() {
         const $label = $('<span class="tv-tree-label"></span>').text(label);
         const $count = $(`<span class="tv-tree-count">${count}</span>`);
 
+        // Schema indicator — show a document icon if node has a template (own or inherited)
+        if (!isRoot && hasEffectiveTemplate(tree.root, node.id)) {
+            const $schemaIcon = $('<i class="fa-solid fa-file-lines tv-schema-indicator" title="Has template"></i>');
+            $row.append($toggle, $dot, $label, $schemaIcon, $count);
+        } else {
+            $row.append($toggle, $dot, $label, $count);
+        }
+
         // Click toggle to expand/collapse
         $toggle.on('click', (e) => {
             e.stopPropagation();
@@ -1184,7 +1225,6 @@ async function onOpenTreeEditor() {
             registerTools();
         });
 
-        $row.append($toggle, $dot, $label, $count);
         $wrapper.append($row);
 
         // Children (recursive — no depth limit)
@@ -1336,6 +1376,43 @@ async function onOpenTreeEditor() {
             </div>`).find('.tv-node-summary-text').text(node.summary).end());
         }
 
+        // Template section (only for non-root, non-unassigned nodes)
+        if (!isUnassigned && !isRoot) {
+            const $templateSection = $('<div class="tv-template-section"></div>');
+
+            // Editable template textarea
+            const $templateLabel = $('<div class="tv-template-label">Entry Template</div>');
+            const $templateHelp = $('<div class="tv-template-help">Define sections using markdown headings (e.g., #Appearance, #Personality). Child nodes inherit and add sections.</div>');
+            const $templateTextarea = $('<textarea class="tv-template-textarea" rows="3" placeholder="# Appearance\n# Personality\n# Background"></textarea>');
+            $templateTextarea.val(node.template || '');
+
+            $templateTextarea.on('change', function () {
+                node.template = $(this).val();
+                saveTree(bookName, tree);
+                renderTreeNodes(); // refresh schema indicators
+                renderMainPanel(); // refresh effective template preview
+                registerTools();
+            });
+
+            $templateSection.append($templateLabel, $templateHelp, $templateTextarea);
+
+            // Effective template preview (read-only)
+            const effectiveTemplate = getEffectiveTemplateForNode(tree.root, node.id);
+            if (effectiveTemplate) {
+                const sections = parseTemplateSections(effectiveTemplate);
+                const $preview = $('<div class="tv-effective-template"></div>');
+                const $previewLabel = $('<div class="tv-effective-template-label">Effective Template (inherited + own)</div>');
+                const $previewTags = $('<div class="tv-effective-template-tags"></div>');
+                for (const section of sections) {
+                    $previewTags.append($(`<span class="tv-effective-template-tag"># ${escapeHtml(section)}</span>`));
+                }
+                $preview.append($previewLabel, $previewTags);
+                $templateSection.append($preview);
+            }
+
+            $body.append($templateSection);
+        }
+
         // Direct entries
         const entryUids = node.entryUids || [];
         if (entryUids.length > 0) {
@@ -1356,10 +1433,16 @@ async function onOpenTreeEditor() {
             const $cards = $('<div class="tv-child-cards"></div>');
             for (const child of children) {
                 const childCount = countActiveEntries(child);
-                const $card = $('<div class="tv-child-card"></div>');
+                const hasTemplate = hasEffectiveTemplate(tree.root, child.id);
+                const $card = $(`<div class="tv-child-card${hasTemplate ? ' tv-child-card-schema' : ''}"></div>`);
                 $card.append($('<span class="tv-tree-dot"></span>'));
                 const $info = $('<div class="tv-child-card-info"></div>');
-                $info.append($('<div class="tv-child-card-name"></div>').text(child.label || 'Unnamed'));
+                const $nameRow = $('<div class="tv-child-card-name-row"></div>');
+                $nameRow.append($('<span class="tv-child-card-name"></span>').text(child.label || 'Unnamed'));
+                if (hasTemplate) {
+                    $nameRow.append($('<i class="fa-solid fa-file-lines tv-child-card-schema-icon" title="Has template"></i>'));
+                }
+                $info.append($nameRow);
                 if (child.summary) {
                     $info.append($('<div class="tv-child-card-summary"></div>').text(child.summary));
                 }
@@ -1625,6 +1708,123 @@ async function onOpenTreeEditor() {
                     $expand.append($condSection);
                 }
 
+                // Links editor
+                {
+                    const $linksSection = $('<div class="tv-expand-links"></div>');
+                    $linksSection.append($('<span class="tv-expand-label">Links</span>'));
+
+                    // Outgoing links (this entry links to others)
+                    const $outgoingLinks = $('<div class="tv-links-subsection"></div>');
+                    $outgoingLinks.append($('<div class="tv-links-subtitle">Links to:</div>'));
+
+                    const $outgoingTags = $('<div class="tv-links-tags"></div>');
+                    const outgoingLinks = getEntryLinks(bookName, uid);
+
+                    const renderOutgoingLink = (link) => {
+                        const linkedEntry = bookData.entries[Object.keys(bookData.entries).find(k => bookData.entries[k].uid === link.uid)];
+                        const linkedTitle = linkedEntry ? (linkedEntry.comment || `Entry #${link.uid}`) : `Entry #${link.uid}`;
+                        const $tag = $(`<span class="tv-link-tag tv-link-outgoing" title="UID: ${link.uid}">
+                            <span class="tv-link-title">${escapeHtml(linkedTitle)}</span>
+                            <span class="tv-link-relation">→ ${escapeHtml(link.relation)}</span>
+                            <i class="fa-solid fa-xmark tv-link-remove" title="Remove link"></i>
+                        </span>`);
+
+                        $tag.find('.tv-link-remove').on('click', (e) => {
+                            e.stopPropagation();
+                            if (confirm(`Remove link to "${linkedTitle}"?`)) {
+                                removeEntryLink(bookName, uid, link.uid);
+                                $tag.fadeOut(150, () => {
+                                    $tag.remove();
+                                    if ($outgoingTags.children().length === 0) {
+                                        $outgoingTags.append('<span class="tv-links-empty">No outgoing links</span>');
+                                    }
+                                });
+                                toastr.info('Link removed.', 'TunnelVision');
+                            }
+                        });
+
+                        return $tag;
+                    };
+
+                    if (outgoingLinks.length > 0) {
+                        for (const link of outgoingLinks) {
+                            $outgoingTags.append(renderOutgoingLink(link));
+                        }
+                    } else {
+                        $outgoingTags.append('<span class="tv-links-empty">No outgoing links</span>');
+                    }
+                    $outgoingLinks.append($outgoingTags);
+
+                    // Add link form
+                    const $addLinkRow = $(`<div class="tv-link-add-row">
+                        <input type="number" class="tv-link-uid-input" placeholder="Entry UID" min="1" />
+                        <input type="text" class="tv-link-relation-input" placeholder="Relation (e.g. lives_in)" />
+                        <button class="tv-popup-btn tv-popup-btn-sm tv-link-add-btn" title="Add link"><i class="fa-solid fa-plus"></i></button>
+                    </div>`);
+
+                    $addLinkRow.find('.tv-link-add-btn').on('click', (e) => {
+                        e.stopPropagation();
+                        const linkUid = parseInt($addLinkRow.find('.tv-link-uid-input').val(), 10);
+                        const relation = $addLinkRow.find('.tv-link-relation-input').val().trim();
+
+                        if (isNaN(linkUid) || linkUid <= 0) {
+                            toastr.warning('Enter a valid entry UID.', 'TunnelVision');
+                            return;
+                        }
+                        if (!relation) {
+                            toastr.warning('Enter a relationship type.', 'TunnelVision');
+                            return;
+                        }
+
+                        // Check if link already exists
+                        if (outgoingLinks.some(l => l.uid === linkUid && l.relation === relation)) {
+                            toastr.warning('This link already exists.', 'TunnelVision');
+                            return;
+                        }
+
+                        // Check if target entry exists
+                        const targetExists = Object.values(bookData.entries).some(e => e.uid === linkUid);
+                        if (!targetExists) {
+                            toastr.warning(`Entry UID ${linkUid} not found in this lorebook.`, 'TunnelVision');
+                            return;
+                        }
+
+                        addEntryLink(bookName, uid, linkUid, relation);
+                        $outgoingTags.find('.tv-links-empty').remove();
+                        $outgoingTags.append(renderOutgoingLink({ uid: linkUid, relation }));
+                        $addLinkRow.find('.tv-link-uid-input').val('');
+                        $addLinkRow.find('.tv-link-relation-input').val('');
+                        toastr.success('Link added.', 'TunnelVision');
+                    });
+
+                    $outgoingLinks.append($addLinkRow);
+                    $linksSection.append($outgoingLinks);
+
+                    // Back-links (others link to this entry)
+                    const $backLinks = $('<div class="tv-links-subsection"></div>');
+                    $backLinks.append($('<div class="tv-links-subtitle">Linked from:</div>'));
+
+                    const $backTags = $('<div class="tv-links-tags"></div>');
+                    const backLinks = getBackLinks(bookName, uid);
+
+                    if (backLinks.length > 0) {
+                        for (const link of backLinks) {
+                            const fromEntry = bookData.entries[Object.keys(bookData.entries).find(k => bookData.entries[k].uid === link.uid)];
+                            const fromTitle = fromEntry ? (fromEntry.comment || `Entry #${link.uid}`) : `Entry #${link.uid}`;
+                            $backTags.append($(`<span class="tv-link-tag tv-link-incoming" title="UID: ${link.uid}">
+                                <span class="tv-link-title">${escapeHtml(fromTitle)}</span>
+                                <span class="tv-link-relation">← ${escapeHtml(link.relation)}</span>
+                            </span>`));
+                        }
+                    } else {
+                        $backTags.append('<span class="tv-links-empty">No back-links</span>');
+                    }
+                    $backLinks.append($backTags);
+                    $linksSection.append($backLinks);
+
+                    $expand.append($linksSection);
+                }
+
                 // Content
                 if (entry.content) {
                     $expand.append($('<div class="tv-expand-label">Content</div>'));
@@ -1682,6 +1882,91 @@ async function onOpenTreeEditor() {
         renderTreeNodes();
         renderMainPanel();
         registerTools();
+    });
+
+    // Load Schema Template
+    $popup.find('#tv_popup_load_schema').on('click', () => {
+        const names = getSchemaStarterNames();
+        if (names.length === 0) {
+            toastr.info('No schema templates available.', 'TunnelVision');
+            return;
+        }
+
+        // Build a popup listing available schema starters
+        const $picker = $('<div class="tv-schema-picker"></div>');
+        $picker.append('<div class="tv-schema-picker-title">Choose a schema template to load:</div>');
+
+        const builtIn = Object.keys(SCHEMA_STARTERS);
+        const settings = getSettings();
+        const savedNames = Object.keys(settings.savedSchemaTemplates || {});
+
+        if (builtIn.length > 0) {
+            $picker.append('<div class="tv-schema-picker-group">Built-in Templates</div>');
+            for (const name of builtIn) {
+                const $btn = $(`<button class="tv-schema-picker-btn">${escapeHtml(name)}</button>`);
+                $btn.on('click', async () => {
+                    const starter = getSchemaStarter(name);
+                    if (!starter?.nodes) return;
+                    const replace = confirm(`Load "${name}" schema? This will REPLACE the current tree.`);
+                    if (!replace) return;
+                    tree.root.children = starterNodesToTreeNodes(starter.nodes);
+                    tree.root.collapsed = false;
+                    saveTree(bookName, tree);
+                    renderTreeNodes();
+                    renderMainPanel();
+                    registerTools();
+                    toastr.success(`Loaded "${name}" schema template.`, 'TunnelVision');
+                    $('.popup.active .popup-button-close, .popup:last-child [data-i18n="Close"]').trigger('click');
+                });
+                $picker.append($btn);
+            }
+        }
+
+        if (savedNames.length > 0) {
+            $picker.append('<div class="tv-schema-picker-group">Your Templates</div>');
+            for (const name of savedNames) {
+                const $row = $('<div class="tv-schema-picker-row"></div>');
+                const $btn = $(`<button class="tv-schema-picker-btn">${escapeHtml(name)}</button>`);
+                $btn.on('click', async () => {
+                    const starter = getSchemaStarter(name);
+                    if (!starter?.nodes) return;
+                    const replace = confirm(`Load "${name}" schema? This will REPLACE the current tree.`);
+                    if (!replace) return;
+                    tree.root.children = starterNodesToTreeNodes(starter.nodes);
+                    tree.root.collapsed = false;
+                    saveTree(bookName, tree);
+                    renderTreeNodes();
+                    renderMainPanel();
+                    registerTools();
+                    toastr.success(`Loaded "${name}" schema template.`, 'TunnelVision');
+                    $('.popup.active .popup-button-close, .popup:last-child [data-i18n="Close"]').trigger('click');
+                });
+                const $del = $('<button class="tv-schema-picker-del" title="Delete template"><i class="fa-solid fa-xmark"></i></button>');
+                $del.on('click', (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`Delete your saved template "${name}"?`)) return;
+                    deleteSchemaTemplate(name);
+                    $row.fadeOut(150, () => $row.remove());
+                    toastr.info(`Deleted template "${name}".`, 'TunnelVision');
+                });
+                $row.append($btn, $del);
+                $picker.append($row);
+            }
+        }
+
+        callGenericPopup($picker, POPUP_TYPE.TEXT, '', { allowVerticalScrolling: true });
+    });
+
+    // Save as Template
+    $popup.find('#tv_popup_save_schema').on('click', () => {
+        if (!(tree.root.children || []).length) {
+            toastr.warning('Tree is empty. Add categories first.', 'TunnelVision');
+            return;
+        }
+        const name = prompt('Save current tree structure as a template.\nName:');
+        if (!name?.trim()) return;
+        saveSchemaTemplate(name.trim(), tree.root);
+        toastr.success(`Saved template "${name.trim()}".`, 'TunnelVision');
     });
 
     $popup.find('#tv_popup_regen').on('click', async () => {
@@ -1772,6 +2057,7 @@ function sanitizeImportedNode(node) {
     if (typeof node.id !== 'string' || !node.id) node.id = `tv_import_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     if (typeof node.label !== 'string') node.label = 'Unnamed';
     if (typeof node.summary !== 'string') node.summary = '';
+    if (typeof node.template !== 'string') node.template = '';
     if (!Array.isArray(node.entryUids)) node.entryUids = [];
     if (!Array.isArray(node.children)) node.children = [];
 
@@ -1779,7 +2065,7 @@ function sanitizeImportedNode(node) {
     node.entryUids = node.entryUids.filter(uid => typeof uid === 'number' && Number.isFinite(uid));
 
     // Strip any unexpected/dangerous keys (prototype pollution vectors)
-    const allowed = new Set(['id', 'label', 'summary', 'entryUids', 'children', 'collapsed', 'isArc']);
+    const allowed = new Set(['id', 'label', 'summary', 'entryUids', 'children', 'collapsed', 'isArc', 'template']);
     for (const key of Object.keys(node)) {
         if (!allowed.has(key)) delete node[key];
     }

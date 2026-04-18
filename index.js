@@ -35,7 +35,9 @@ import { separateConditions, isEvaluableCondition, formatCondition, EVALUABLE_TY
 import { loadWorldInfo, saveWorldInfo, world_names } from '../../../world-info.js';
 
 const EXTENSION_NAME = 'tunnelvision';
-const EXTENSION_FOLDER = `third-party/TunnelVision`;
+const EXTENSION_FOLDER = new URL(import.meta.url).pathname
+    .replace(/^\/scripts\/extensions\//, '')
+    .replace(/\/[^/]+$/, '');
 
 // Guard: prevents tool re-registration when WORLDINFO_UPDATED fires during generation
 // (lorebook saves from tool actions trigger this event mid-generation).

@@ -3105,6 +3105,8 @@
 .tv-new-entry-hint { font-size: 10px; color: var(--SmartThemeQuoteColor, #888); font-weight: 400; margin-left: 4px; }
 .tv-new-entry-required { color: #ef4444; margin-left: 2px; }
 .tv-new-entry-node { width: 100%; padding: 6px 10px; background: var(--black30a, rgba(0,0,0,0.15)); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: var(--SmartThemeBodyColor); font-size: 13px; }
+.tv-new-entry-schema-hint { margin-top: 5px; font-size: 11px; color: var(--SmartThemeQuoteColor, #888); display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.tv-new-entry-schema-label { white-space: nowrap; }
 
 /* ===== Delete Row in Entry Expand ===== */
 .tv-expand-delete-row { margin-top: 4px; padding-top: 10px; border-top: 1px solid rgba(239,68,68,0.15); display: flex; justify-content: flex-end; }

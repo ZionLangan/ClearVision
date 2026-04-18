@@ -1943,8 +1943,40 @@ async function onOpenTreeEditor() {
             if (n.id === defaultNodeId) $opt.prop('selected', true);
             $nodeSelect.append($opt);
         }
-        $nodeField.append($nodeSelect);
+        // Schema indicator and auto-scaffold
+        const $schemaHint = $('<div class="tv-new-entry-schema-hint" style="display:none"></div>');
+        function updateSchemaHint(nodeId) {
+            const template = getEffectiveTemplateForNode(tree.root, nodeId);
+            $schemaHint.empty();
+            if (!template) { $schemaHint.hide(); return; }
+            const sections = parseTemplateSections(template);
+            $schemaHint.show();
+            $schemaHint.append($('<span class="tv-new-entry-schema-label"><i class="fa-solid fa-file-lines"></i> Template: </span>'));
+            const $tags = $('<span class="tv-effective-template-tags" style="display:inline-flex;flex-wrap:wrap;"></span>');
+            for (const s of sections) {
+                $tags.append($(`<span class="tv-effective-template-tag"># ${escapeHtml(s)}</span>`));
+            }
+            $schemaHint.append($tags);
+        }
+        function applySchemaScaffold(nodeId) {
+            const template = getEffectiveTemplateForNode(tree.root, nodeId);
+            if (!template) return;
+            const $contentEl = $form.find('.tv-new-entry-content');
+            if ($contentEl.val().trim()) return; // don't overwrite user-entered content
+            const sections = parseTemplateSections(template);
+            $contentEl.val(sections.map(s => `# ${s}\n\n`).join('\n'));
+        }
+        $nodeSelect.on('change', function () {
+            const nodeId = $(this).val();
+            updateSchemaHint(nodeId);
+            applySchemaScaffold(nodeId);
+        });
+        $nodeField.append($nodeSelect, $schemaHint);
         $form.append($nodeField);
+
+        // Initialize schema state for the default node
+        updateSchemaHint(defaultNodeId);
+        applySchemaScaffold(defaultNodeId);
 
         const result = await callGenericPopup($form, POPUP_TYPE.CONFIRM, '', {
             okButton: 'Create Entry',

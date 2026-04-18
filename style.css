@@ -3262,3 +3262,33 @@
     opacity: 0.55;
     flex-shrink: 0;
 }
+
+.tv-node-picker-schema-badge {
+    margin-left: auto;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(232, 67, 147, 0.15);
+    color: #e84393;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    flex-shrink: 0;
+}
+
+.tv-node-picker-status {
+    font-size: 12px;
+    color: var(--SmartThemeQuoteColor, #aaa);
+    padding: 4px 0 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tv-node-picker-row:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.tv-node-picker-row.tv-node-picker-loading {
+    opacity: 0.8;
+}

@@ -57,6 +57,7 @@ import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { separateConditions, isEvaluableCondition, formatCondition, EVALUABLE_TYPES, CONDITION_LABELS, getKeywordProbability, setKeywordProbability } from './conditions.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
 import { createEntry, forgetEntry } from './entry-manager.js';
+import { sidecarGenerate, isSidecarConfigured } from './llm-sidecar.js';
 import { getCheckpointInfo, clearCurrentChatCheckpoints, recordNotebook } from './checkpoint-manager.js';
 
 
@@ -2824,9 +2825,9 @@ export function initWITVButtonInjector() {
 
 /**
  * Show a node picker popup so the user can assign (or move) a lorebook entry
- * to a TunnelVision tree node. Clicking a row assigns immediately; the popup
- * can then be dismissed. If the entry is already in the tree, clicking a
- * different node moves it there.
+ * to a TunnelVision tree node. When the target node has a schema template, the
+ * LLM reformats the entry's content to fit the schema before saving. If no
+ * schema is defined, the entry is registered as-is.
  */
 async function openWINodePicker(uid, bookName) {
     const tree = getTree(bookName);
@@ -2838,34 +2839,108 @@ async function openWINodePicker(uid, bookName) {
     const $desc = $('<div class="tv-help-text tv-node-picker-desc"></div>');
     $desc.text(containingNode
         ? `Currently in "${containingNode.label}". Click a node to move it.`
-        : 'Click a node to add this entry to TunnelVision:');
+        : 'Click a node to import this entry into TunnelVision:');
     $popup.append($desc);
+
+    const $status = $('<div class="tv-node-picker-status" style="display:none;"></div>');
+    $popup.append($status);
 
     const $list = $('<div class="tv-node-picker-list"></div>');
 
     function buildRows(node, depth = 0) {
+        const isCurrentNode = containingNode && node.id === containingNode.id;
+
         const $row = $('<button class="tv-node-picker-row" type="button"></button>');
         $row.css('padding-left', `${8 + depth * 14}px`);
 
-        const isCurrentNode = containingNode && node.id === containingNode.id;
         const $icon = $(`<i class="fa-solid ${isCurrentNode ? 'fa-folder-open' : 'fa-folder'} tv-node-picker-icon"></i>`);
         const $label = $('<span></span>').text(node.label);
-        $row.append($icon, $label);
+
+        // Show schema badge if this node has a template
+        const schema = getEffectiveTemplateForNode(tree.root, node.id);
+        if (schema) {
+            const $badge = $('<span class="tv-node-picker-schema-badge" title="Has schema — LLM will reformat entry">schema</span>');
+            $row.append($icon, $label, $badge);
+        } else {
+            $row.append($icon, $label);
+        }
 
         if (isCurrentNode) {
             $row.addClass('tv-node-picker-current');
         }
 
-        $row.on('click', () => {
+        $row.on('click', async () => {
+            if ($row.hasClass('tv-node-picker-loading')) return;
+
             const freshTree = getTree(bookName);
             if (!freshTree) return;
             const targetNode = findNodeById(freshTree.root, node.id);
             if (!targetNode) return;
-            removeEntryFromTree(freshTree.root, uid);
-            addEntryToNode(targetNode, uid);
-            saveTree(bookName, freshTree);
-            const action = containingNode ? `Moved to "${node.label}"` : `Added to "${node.label}"`;
-            toastr.success(`${action} in TunnelVision.`, 'TunnelVision');
+
+            const freshSchema = getEffectiveTemplateForNode(freshTree.root, node.id);
+
+            if (freshSchema) {
+                // Schema present — use the LLM to reformat the entry content
+                if (!isSidecarConfigured()) {
+                    toastr.warning(
+                        'No LLM connection profile selected. Choose one in TunnelVision settings to enable schema-based import.',
+                        'TunnelVision',
+                    );
+                    return;
+                }
+
+                // Lock UI during generation
+                $list.find('.tv-node-picker-row').prop('disabled', true);
+                $row.addClass('tv-node-picker-loading');
+                $row.find('.tv-node-picker-icon').removeClass('fa-folder fa-folder-open').addClass('fa-spinner fa-spin');
+                $status.text('Reformatting entry to match schema…').show();
+
+                try {
+                    const bookData = await loadWorldInfo(bookName);
+                    if (!bookData?.entries) throw new Error('Could not load lorebook data.');
+
+                    // Find the entry by UID
+                    let entry = null;
+                    for (const key of Object.keys(bookData.entries)) {
+                        if (bookData.entries[key].uid === uid) { entry = bookData.entries[key]; break; }
+                    }
+                    if (!entry) throw new Error(`Entry UID ${uid} not found in lorebook.`);
+
+                    const entryTitle = entry.comment || `Entry #${uid}`;
+                    const entryContent = entry.content || '';
+
+                    const reformatted = await sidecarGenerate({
+                        systemPrompt: 'You are reformatting a lorebook entry to fit a structured schema. Output ONLY the reformatted content using the schema sections as headings. Do not add explanation, preamble, or JSON. Preserve all factual information from the original — do not invent new details.',
+                        prompt: `Reformat the lorebook entry below to match the schema template. Use each schema heading as a section and distribute the original content into the appropriate sections.\n\nEntry title: ${entryTitle}\n\nOriginal content:\n${entryContent}\n\nSchema template:\n${freshSchema}\n\nReturn only the reformatted content.`,
+                    });
+
+                    // Save reformatted content back to the lorebook entry
+                    entry.content = reformatted.trim();
+                    await saveWorldInfo(bookName, bookData, true);
+
+                    // Register in tree
+                    removeEntryFromTree(freshTree.root, uid);
+                    addEntryToNode(targetNode, uid);
+                    saveTree(bookName, freshTree);
+
+                    toastr.success(`Imported "${entryTitle}" into "${node.label}" with schema applied.`, 'TunnelVision');
+                } catch (err) {
+                    toastr.error(`Import failed: ${err.message}`, 'TunnelVision');
+                    console.error('[TunnelVision] Schema import error:', err);
+                } finally {
+                    $list.find('.tv-node-picker-row').prop('disabled', false);
+                    $row.removeClass('tv-node-picker-loading');
+                    $row.find('.fa-spinner').removeClass('fa-spinner fa-spin').addClass(isCurrentNode ? 'fa-folder-open' : 'fa-folder');
+                    $status.hide();
+                }
+            } else {
+                // No schema — register as-is without any LLM call
+                removeEntryFromTree(freshTree.root, uid);
+                addEntryToNode(targetNode, uid);
+                saveTree(bookName, freshTree);
+                const action = containingNode ? `Moved to "${node.label}"` : `Added to "${node.label}"`;
+                toastr.success(`${action} in TunnelVision.`, 'TunnelVision');
+            }
         });
 
         $list.append($row);

@@ -56,7 +56,7 @@ import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { separateConditions, isEvaluableCondition, formatCondition, EVALUABLE_TYPES, CONDITION_LABELS, getKeywordProbability, setKeywordProbability } from './conditions.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
 import { createEntry, forgetEntry } from './entry-manager.js';
-import { getCheckpointInfo, clearCurrentChatCheckpoints } from './checkpoint-manager.js';
+import { getCheckpointInfo, clearCurrentChatCheckpoints, recordNotebook } from './checkpoint-manager.js';
 
 
 let currentLorebook = null;
@@ -107,6 +107,7 @@ export function bindUIEvents() {
     $('#tv_bulk_import_file').on('change', onBulkImport);
     $('#tv_bulk_import').on('click', () => $('#tv_bulk_import_file').trigger('click'));
 
+    $('#tv_open_notebook').on('click', openNotebookEditor);
     $('#tv_run_diagnostics').on('click', onRunDiagnostics);
 
     // Lorebook filter
@@ -342,6 +343,7 @@ export function refreshUI() {
     // Sync checkpoint desync protection settings
     $('#tv_enable_checkpoints').prop('checked', settings.enableCheckpoints !== false);
     updateCheckpointInfoDisplay();
+    updateNotebookBadge();
 
     // Sync connection profile + sidecar sampler controls
     populateConnectionProfiles();
@@ -2578,4 +2580,152 @@ function updateCheckpointInfoDisplay() {
     } else {
         $info.text(`${info.count} checkpoint${info.count !== 1 ? 's' : ''} saved (~${info.estimatedKb} KB). ${info.hadChangesCount} with lorebook changes.`);
     }
+}
+
+// ─── Notebook Editor ─────────────────────────────────────────────
+
+export function updateNotebookBadge() {
+    const context = getContext();
+    const notes = context.chatMetadata?.['tunnelvision_notebook'] || [];
+    const $badge = $('#tv_notebook_note_count');
+    if (notes.length > 0) {
+        $badge.text(notes.length).show();
+    } else {
+        $badge.hide();
+    }
+}
+
+async function openNotebookEditor() {
+    const context = getContext();
+    if (!context.chatMetadata) {
+        toastr.warning('No chat is open.', 'TunnelVision');
+        return;
+    }
+
+    const NOTEBOOK_KEY = 'tunnelvision_notebook';
+
+    function getNotebook() {
+        if (!context.chatMetadata[NOTEBOOK_KEY]) {
+            context.chatMetadata[NOTEBOOK_KEY] = [];
+        }
+        return context.chatMetadata[NOTEBOOK_KEY];
+    }
+
+    function saveNotebook() {
+        context.saveMetadataDebounced();
+        updateNotebookBadge();
+    }
+
+    const $popup = $('<div class="tv-notebook-editor"></div>');
+    const $inner = $('<div class="tv-notebook-editor-inner"></div>');
+    $inner.append('<div class="tv-help-text tv-notebook-description">The AI\'s private scratchpad for this chat. Read, edit, or remove notes. New notes the AI writes will appear here automatically.</div>');
+
+    const $list = $('<div class="tv-notebook-list"></div>');
+    $inner.append($list);
+
+    const $addSection = $('<div class="tv-notebook-add-section"></div>');
+    $addSection.append('<div class="tv-adv-section-title">Add Note</div>');
+    const $titleInput = $('<input class="text_pole tv-notebook-new-title" type="text" placeholder="Title..." />');
+    const $contentInput = $('<textarea class="tv-textarea tv-notebook-new-content" rows="3" placeholder="Content..."></textarea>');
+    const $btnRow = $('<div class="tv-notebook-btn-row"></div>');
+    const $addBtn = $('<button class="tv-btn tv-btn-primary"><i class="fa-solid fa-plus"></i> Add Note</button>');
+    const $clearBtn = $('<button class="tv-btn tv-btn-sm tv-btn-secondary" title="Clear all notes"><i class="fa-solid fa-trash-can"></i> Clear All</button>');
+    $btnRow.append($addBtn, $clearBtn);
+    $addSection.append($titleInput, $contentInput, $btnRow);
+    $inner.append($addSection);
+    $popup.append($inner);
+
+    function renderNotes() {
+        $list.empty();
+        const notebook = getNotebook();
+        if (notebook.length === 0) {
+            $list.append('<div class="tv-notebook-empty">No notes yet. The AI writes notes here during conversation.</div>');
+            return;
+        }
+        for (const note of notebook) {
+            const $note = $('<div class="tv-notebook-note"></div>').attr('data-id', note.id);
+            const $header = $('<div class="tv-notebook-note-header"></div>');
+            const $noteTitle = $('<input class="tv-notebook-note-title text_pole" type="text" placeholder="Title" />').val(note.title);
+            const $deleteBtn = $('<button class="tv-notebook-note-delete tv-btn tv-btn-sm" title="Delete note"><i class="fa-solid fa-trash-can"></i></button>');
+            const $noteContent = $('<textarea class="tv-notebook-note-content tv-textarea" rows="3" placeholder="Content"></textarea>').val(note.content);
+            $header.append($noteTitle, $deleteBtn);
+            $note.append($header, $noteContent);
+            $list.append($note);
+        }
+
+        $list.find('.tv-notebook-note-title').on('change', function () {
+            const noteId = $(this).closest('.tv-notebook-note').data('id');
+            const notebook = getNotebook();
+            const note = notebook.find(n => n.id === noteId);
+            if (!note) return;
+            const newTitle = $(this).val().trim();
+            if (!newTitle) { $(this).val(note.title); return; }
+            recordNotebook(notebook);
+            note.title = newTitle;
+            saveNotebook();
+        });
+
+        $list.find('.tv-notebook-note-content').on('change', function () {
+            const noteId = $(this).closest('.tv-notebook-note').data('id');
+            const notebook = getNotebook();
+            const note = notebook.find(n => n.id === noteId);
+            if (!note) return;
+            recordNotebook(notebook);
+            note.content = $(this).val();
+            saveNotebook();
+        });
+
+        $list.find('.tv-notebook-note-delete').on('click', function () {
+            const noteId = $(this).closest('.tv-notebook-note').data('id');
+            const notebook = getNotebook();
+            const idx = notebook.findIndex(n => n.id === noteId);
+            if (idx === -1) return;
+            recordNotebook(notebook);
+            notebook.splice(idx, 1);
+            saveNotebook();
+            renderNotes();
+        });
+    }
+
+    renderNotes();
+
+    $addBtn.on('click', () => {
+        const title = $titleInput.val().trim();
+        const content = $contentInput.val().trim();
+        if (!title || !content) {
+            toastr.warning('Both title and content are required.', 'TunnelVision');
+            return;
+        }
+        const notebook = getNotebook();
+        if (notebook.length >= 50) {
+            toastr.warning('Notebook is full (50 notes). Remove some notes first.', 'TunnelVision');
+            return;
+        }
+        recordNotebook(notebook);
+        notebook.push({
+            id: `note_${Date.now().toString(36)}`,
+            title,
+            content,
+            created: Date.now(),
+        });
+        saveNotebook();
+        $titleInput.val('');
+        $contentInput.val('');
+        renderNotes();
+    });
+
+    $clearBtn.on('click', async () => {
+        const notebook = getNotebook();
+        if (notebook.length === 0) return;
+        const confirmed = await callGenericPopup('Clear all notes from the AI notebook? This cannot be undone.', POPUP_TYPE.CONFIRM);
+        if (!confirmed) return;
+        recordNotebook(notebook);
+        notebook.length = 0;
+        saveNotebook();
+        renderNotes();
+    });
+
+    await callGenericPopup($popup, POPUP_TYPE.DISPLAY, '', {
+        allowVerticalScrolling: true,
+    });
 }

@@ -110,6 +110,10 @@ export async function runDiagnostics() {
     results.push(...checkEntryMatchesSchema());
     results.push(...await checkOrphanLinks());
     results.push(...checkBidirectionalLinks());
+    results.push(checkCheckpointSetting());
+    results.push(checkCheckpointStructure());
+    results.push(checkCheckpointCount());
+    results.push(checkPotentialDesync());
 
     const settingsAfter = JSON.stringify(getSettings());
     if (settingsBefore !== settingsAfter) {
@@ -1968,4 +1972,104 @@ function warn(message) {
 
 function fail(message) {
     return { status: 'fail', message, fix: null };
+}
+
+// ─── Checkpoint Diagnostics ──────────────────────────────────────
+
+/** Check that enableCheckpoints setting exists and is a valid boolean. */
+function checkCheckpointSetting() {
+    const settings = getSettings();
+    if (typeof settings.enableCheckpoints === 'undefined') {
+        settings.enableCheckpoints = true;
+        return warn('enableCheckpoints was missing. Auto-set to true.');
+    }
+    if (typeof settings.enableCheckpoints !== 'boolean') {
+        settings.enableCheckpoints = true;
+        return warn(`enableCheckpoints had invalid type "${typeof settings.enableCheckpoints}". Auto-reset to true.`);
+    }
+    return pass(`Checkpoint desync protection: ${settings.enableCheckpoints ? 'enabled' : 'disabled'}`);
+}
+
+/** Check that checkpoints is a plain object (not null/corrupt). */
+function checkCheckpointStructure() {
+    const settings = getSettings();
+    if (!settings.checkpoints || typeof settings.checkpoints !== 'object' || Array.isArray(settings.checkpoints)) {
+        settings.checkpoints = {};
+        return warn('checkpoints structure was missing or corrupt. Auto-reset to empty object.');
+    }
+    const chatCount = Object.keys(settings.checkpoints).length;
+    if (chatCount > 20) {
+        return warn(`checkpoints contains data for ${chatCount} chats. This is unusually high — old entries should be pruned automatically on chat switch.`);
+    }
+    return pass(`Checkpoints storage valid (${chatCount} chat${chatCount !== 1 ? 's' : ''} with checkpoint data)`);
+}
+
+/** Warn if the current chat has more checkpoints than maxCheckpoints. */
+function checkCheckpointCount() {
+    const settings = getSettings();
+    if (!settings.enableCheckpoints) {
+        return pass('Checkpoints disabled — skipping count check');
+    }
+
+    try {
+        const context = getContext();
+        const chatId = context.getCurrentChatId?.() ?? context.chatId ?? null;
+        if (!chatId) {
+            return pass('No active chat — skipping checkpoint count check');
+        }
+        const checkpoints = settings.checkpoints?.[chatId] || [];
+        const max = settings.maxCheckpoints ?? 25;
+        if (checkpoints.length > max) {
+            return warn(`Current chat has ${checkpoints.length} checkpoints, exceeding maxCheckpoints (${max}). They should have been pruned automatically.`);
+        }
+        const withChanges = checkpoints.filter(cp => cp.hadChanges).length;
+        return pass(`Current chat: ${checkpoints.length} checkpoint${checkpoints.length !== 1 ? 's' : ''} (${withChanges} with lorebook changes, cap: ${max})`);
+    } catch {
+        return pass('Could not check checkpoint count (no active chat context)');
+    }
+}
+
+/**
+ * Warn if the current chat has AI messages with tool_invocations but no checkpoints —
+ * a potential desync where the lorebook was written to but cannot be rolled back.
+ */
+function checkPotentialDesync() {
+    const settings = getSettings();
+    if (!settings.enableCheckpoints) {
+        return pass('Checkpoints disabled — desync detection skipped');
+    }
+
+    try {
+        const context = getContext();
+        const chatId = context.getCurrentChatId?.() ?? context.chatId ?? null;
+        if (!chatId) {
+            return pass('No active chat — desync check skipped');
+        }
+        const chat = context.chat;
+        if (!chat || chat.length === 0) {
+            return pass('Empty chat — no desync risk');
+        }
+
+        const checkpoints = settings.checkpoints?.[chatId] || [];
+
+        // Count AI messages that have tool_invocations
+        let toolCallMessages = 0;
+        for (const msg of chat) {
+            if (!msg.is_user && !msg.is_system && Array.isArray(msg.extra?.tool_invocations)) {
+                if (msg.extra.tool_invocations.some(inv => inv.name?.startsWith('TunnelVision_'))) {
+                    toolCallMessages++;
+                }
+            }
+        }
+
+        if (toolCallMessages > 0 && checkpoints.length === 0) {
+            return warn(`Current chat has ${toolCallMessages} AI message(s) with TunnelVision tool calls but no saved checkpoints. Lorebook changes from those generations cannot be rolled back. (This is normal for chats that pre-date the checkpoint feature.)`);
+        }
+        if (toolCallMessages > 0) {
+            return pass(`Checkpoint coverage: ${checkpoints.length} checkpoint${checkpoints.length !== 1 ? 's' : ''} for ${toolCallMessages} tool-call message(s) — rollback is available`);
+        }
+        return pass('No TunnelVision tool calls in current chat — no desync risk');
+    } catch {
+        return pass('Could not check for desync (no active chat context)');
+    }
 }

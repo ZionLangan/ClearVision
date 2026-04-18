@@ -18,6 +18,7 @@ import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescripti
 import { markAutoSummaryComplete } from '../auto-summary.js';
 import { getContext } from '../../../../st-context.js';
 import { hideChatMessageRange } from '../../../../chats.js';
+import { recordWatermark } from '../checkpoint-manager.js';
 
 export const TOOL_NAME = 'TunnelVision_Summarize';
 export const COMPACT_DESCRIPTION = 'Create a scene or event summary to preserve significant narrative beats in long-term memory.';
@@ -41,6 +42,8 @@ function getWatermark() {
  */
 function setWatermark(messageId) {
     const context = getContext();
+    // Capture before-state for checkpoint before overwriting
+    recordWatermark(context.chatMetadata?.[WATERMARK_KEY] ?? null);
     context.chatMetadata[WATERMARK_KEY] = messageId;
 }
 

@@ -34,6 +34,21 @@ import {
 } from './tree-store.js';
 
 /**
+ * Checkpoint change listener. Set by checkpoint-manager.js via setCheckpointListener().
+ * Called with (event, bookName, ...args) after/before each lorebook mutation.
+ * @type {Function|null}
+ */
+let _changeListener = null;
+
+/**
+ * Register (or clear) the checkpoint change listener.
+ * @param {Function|null} fn
+ */
+export function setCheckpointListener(fn) {
+    _changeListener = fn;
+}
+
+/**
  * Create a new lorebook entry and assign it to a tree node.
  * @param {string} bookName - Lorebook name
  * @param {Object} params
@@ -76,6 +91,9 @@ export async function createEntry(bookName, { content, comment, keys, nodeId, li
 
     // Persist to disk
     await saveWorldInfo(bookName, bookData, true);
+
+    // Notify checkpoint listener (after creation, UID is now known)
+    _changeListener?.('created', bookName, newEntry.uid);
 
     // Assign to tree node
     let nodeLabel = 'Root';
@@ -133,6 +151,15 @@ export async function updateEntry(bookName, uid, updates) {
     if (!entry) {
         throw new Error(`Entry UID ${uid} not found in lorebook "${bookName}".`);
     }
+
+    // Capture before-state for checkpoint (before any mutation)
+    _changeListener?.('modified', bookName, uid, {
+        content: entry.content,
+        comment: entry.comment,
+        key: [...(entry.key || [])],
+        keysecondary: [...(entry.keysecondary || [])],
+        disable: entry.disable,
+    });
 
     const changed = [];
 
@@ -203,6 +230,14 @@ export async function forgetEntry(bookName, uid, hardDelete = false) {
 
     const comment = entry.comment || `Entry #${uid}`;
     let action;
+
+    // Find nodeId and snapshot entry before any mutation (for checkpoint tracking)
+    let _nodeId = null;
+    const _tree = getTree(bookName);
+    if (_tree && _tree.root) {
+        _nodeId = findNodeContainingUid(_tree.root, uid)?.id || null;
+    }
+    _changeListener?.('deleted', bookName, uid, JSON.parse(JSON.stringify(entry)), _nodeId, hardDelete);
 
     if (hardDelete) {
         // Find the correct key for this UID (keys are NOT the same as UIDs in ST)

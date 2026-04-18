@@ -666,6 +666,27 @@
 
                         <hr class="tv-adv-divider" />
 
+                        <!-- ═══ Chat Branch Desync Protection ═══ -->
+                        <div class="tv-adv-section">
+                            <div class="tv-adv-section-title">Chat Branch Desync Protection</div>
+                            <div class="tv-help-text" style="margin-bottom: 8px;">
+                                Tracks lorebook changes per-generation as delta checkpoints. When you delete, swipe, or regenerate a message, any entries created or modified by that generation are automatically rolled back so your lorebook stays in sync with the accepted conversation.
+                            </div>
+                            <label class="tv-toggle">
+                                <input id="tv_enable_checkpoints" type="checkbox" checked />
+                                <span class="tv-toggle-slider"></span>
+                                <span class="tv-toggle-label">Enable checkpoint-based desync protection</span>
+                            </label>
+                            <div id="tv_checkpoint_info" class="tv-help-text" style="margin-top: 6px;">
+                                <span id="tv_checkpoint_count">No checkpoints saved yet.</span>
+                            </div>
+                            <button id="tv_clear_checkpoints" class="tv-btn tv-btn-sm tv-btn-secondary" style="margin-top: 8px;">
+                                <i class="fa-solid fa-trash-can"></i> Clear Checkpoints
+                            </button>
+                        </div>
+
+                        <hr class="tv-adv-divider" />
+
                         <!-- ═══ Constant Entry Passthrough ═══ -->
                         <div class="tv-adv-section">
                             <div class="tv-adv-section-title">Constant Entry Passthrough</div>

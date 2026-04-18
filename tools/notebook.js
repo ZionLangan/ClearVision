@@ -16,6 +16,7 @@
 import { getContext } from '../../../../st-context.js';
 import { getSettings } from '../tree-store.js';
 import { getActiveTunnelVisionBooks } from '../tool-registry.js';
+import { recordNotebook } from '../checkpoint-manager.js';
 
 export const TOOL_NAME = 'TunnelVision_Notebook';
 export const COMPACT_DESCRIPTION = 'Read or write to the character notebook for freeform notes and planning.';
@@ -135,6 +136,7 @@ Actions:
                         return `Notebook write limit reached for this turn (${MAX_WRITES_PER_GENERATION} writes). Your existing notes are preserved. Continue with your response.`;
                     }
                     const notebook = getNotebook();
+                    recordNotebook(notebook);
                     if (notebook.length >= MAX_NOTES) {
                         return `Notebook is full (${MAX_NOTES} notes). Remove some old notes first.`;
                     }
@@ -172,6 +174,7 @@ Actions:
                         return `Notebook operation limit reached for this turn (${MAX_OPS_PER_GENERATION} ops). Continue with your response.`;
                     }
                     const notebook = getNotebook();
+                    recordNotebook(notebook);
                     const idx = notebook.findIndex(n => n.id === args.note_id);
                     if (idx === -1) {
                         return `Note "${args.note_id}" not found. Use "read" to see current notes.`;
@@ -187,6 +190,7 @@ Actions:
                         return `Notebook operation limit reached for this turn (${MAX_OPS_PER_GENERATION} ops). Continue with your response.`;
                     }
                     const notebook = getNotebook();
+                    recordNotebook(notebook);
                     const count = notebook.length;
                     notebook.length = 0;
                     _writeGuard.operationCount++;

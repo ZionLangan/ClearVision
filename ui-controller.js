@@ -56,6 +56,7 @@ import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { separateConditions, isEvaluableCondition, formatCondition, EVALUABLE_TYPES, CONDITION_LABELS, getKeywordProbability, setKeywordProbability } from './conditions.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
 import { createEntry, forgetEntry } from './entry-manager.js';
+import { getCheckpointInfo, clearCurrentChatCheckpoints } from './checkpoint-manager.js';
 
 
 let currentLorebook = null;
@@ -215,6 +216,10 @@ export function bindUIEvents() {
     // Compact tool prompts
     $('#tv_compact_tool_prompts').on('change', onCompactToolPromptsToggle);
 
+    // Checkpoint desync protection
+    $('#tv_enable_checkpoints').on('change', onEnableCheckpointsToggle);
+    $('#tv_clear_checkpoints').on('click', onClearCheckpoints);
+
     // Per-lorebook permissions
     $('#tv_book_permission').on('change', onBookPermissionChange);
 
@@ -333,6 +338,10 @@ export function refreshUI() {
 
     // Sync multi-book mode
     $(`input[name="tv_multi_book_mode"][value="${settings.multiBookMode || 'unified'}"]`).prop('checked', true);
+
+    // Sync checkpoint desync protection settings
+    $('#tv_enable_checkpoints').prop('checked', settings.enableCheckpoints !== false);
+    updateCheckpointInfoDisplay();
 
     // Sync connection profile + sidecar sampler controls
     populateConnectionProfiles();
@@ -2531,4 +2540,42 @@ function buildEntryLookup(bookData) {
 function escapeHtml(str) {
     if (!str) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ─── Checkpoint Desync Protection ────────────────────────────────
+
+function onEnableCheckpointsToggle() {
+    const settings = getSettings();
+    settings.enableCheckpoints = $(this).prop('checked');
+    saveSettingsDebounced();
+}
+
+function onClearCheckpoints() {
+    const context = getContext();
+    const chatId = context.getCurrentChatId?.() ?? context.chatId ?? null;
+    if (!chatId) {
+        toastr.warning('No active chat — nothing to clear.', 'TunnelVision');
+        return;
+    }
+    clearCurrentChatCheckpoints(chatId);
+    updateCheckpointInfoDisplay();
+    toastr.success('Checkpoints cleared.', 'TunnelVision');
+}
+
+function updateCheckpointInfoDisplay() {
+    const context = getContext();
+    const chatId = context.getCurrentChatId?.() ?? context.chatId ?? null;
+    const $info = $('#tv_checkpoint_count');
+
+    if (!chatId) {
+        $info.text('No active chat.');
+        return;
+    }
+
+    const info = getCheckpointInfo(chatId);
+    if (info.count === 0) {
+        $info.text('No checkpoints saved yet.');
+    } else {
+        $info.text(`${info.count} checkpoint${info.count !== 1 ? 's' : ''} saved (~${info.estimatedKb} KB). ${info.hadChangesCount} with lorebook changes.`);
+    }
 }

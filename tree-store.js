@@ -440,6 +440,10 @@ export const SETTING_DEFAULTS = {
     savedSchemaTemplates: {},
     // Entry links for cross-referencing: { lorebookName: { uid: [{ uid, relation }] } }
     entryLinks: {},
+    // Chat branch desync protection: delta checkpoints per chatId
+    enableCheckpoints: true,
+    maxCheckpoints: 25,
+    checkpoints: {},
 };
 
 // ─── Schema Starter Templates ────────────────────────────────────

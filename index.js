@@ -23,7 +23,7 @@ import { getContext } from '../../../st-context.js';
 import { ToolManager } from '../../../tool-calling.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled, setLorebookEnabled } from './tree-store.js';
-import { preflightToolRuntimeState, registerTools } from './tool-registry.js';
+import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.js';
 import { bindUIEvents, refreshUI } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
@@ -31,6 +31,7 @@ import { initCommands } from './commands.js';
 import { initAutoSummary } from './auto-summary.js';
 import { runSidecarRetrieval } from './sidecar-retrieval.js';
 import { runSidecarWriter } from './sidecar-writer.js';
+import * as checkpointManager from './checkpoint-manager.js';
 import { separateConditions, isEvaluableCondition, formatCondition, EVALUABLE_TYPES, CONDITION_LABELS, getKeywordProbability, setKeywordProbability } from './conditions.js';
 import { loadWorldInfo, saveWorldInfo, world_names } from '../../../world-info.js';
 
@@ -42,6 +43,10 @@ const EXTENSION_FOLDER = new URL(import.meta.url).pathname
 // Guard: prevents tool re-registration when WORLDINFO_UPDATED fires during generation
 // (lorebook saves from tool actions trigger this event mid-generation).
 let _generationInProgress = false;
+
+// Tracks the chatId of the most recently active chat so onChatChanged can prune
+// checkpoints for the departing chat (CHAT_CHANGED fires after the switch).
+let _prevChatId = null;
 
 // Tracks recursion depth for tool-call passes within a single generation turn.
 // ST's Generate() increments depth internally but doesn't expose it to extensions,
@@ -128,6 +133,8 @@ async function init() {
             _toolRecursionDepth = 0;
             _keywordTriggeredUids.clear();
             window.TunnelVision_isRecursiveToolPass = false;
+            // Seal checkpoint (covers aborted/stopped generations; no-op if already sealed)
+            checkpointManager.sealCheckpoint();
         });
     } else {
         if (event_types.GENERATION_STOPPED) {
@@ -145,9 +152,23 @@ async function init() {
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     }
 
-    // Clean up orphaned tool invocations when messages are deleted
+    // Clean up orphaned tool invocations and restore lorebook state when messages are deleted
     if (event_types.MESSAGE_DELETED) {
-        eventSource.on(event_types.MESSAGE_DELETED, cleanOrphanedToolInvocations);
+        eventSource.on(event_types.MESSAGE_DELETED, async () => {
+            cleanOrphanedToolInvocations();
+
+            const settings = getSettings();
+            if (settings.enableCheckpoints !== false) {
+                const ctx = getContext();
+                const chatId = ctx.getCurrentChatId?.() ?? ctx.chatId ?? null;
+                if (chatId) {
+                    const restored = await checkpointManager.restoreForMessageDeleted(chatId);
+                    if (restored) {
+                        window.toastr?.info('Lorebook state restored to match this point in the conversation.', 'TunnelVision');
+                    }
+                }
+            }
+        });
     }
 
     // Refresh connection profile dropdown when profiles change
@@ -165,6 +186,16 @@ async function init() {
 }
 
 async function onChatChanged() {
+    // Prune checkpoints for the chat we're leaving (they are never needed once we leave)
+    const oldChatId = _prevChatId;
+    const context = getContext();
+    _prevChatId = context.getCurrentChatId?.() ?? context.chatId ?? null;
+
+    const settings = getSettings();
+    if (oldChatId && settings.enableCheckpoints !== false) {
+        checkpointManager.pruneCurrentChatCheckpoints(oldChatId);
+    }
+
     autoDetectLorebooks();
     refreshUI();
     await registerTools();
@@ -861,6 +892,25 @@ async function onGenerationStarted(type, opts, dryRun) {
     // Reset per-generation guards (only on first pass, not recursive)
     resetNotebookWriteGuard();
 
+    // Checkpoint: start recording mutations for this generation
+    {
+        const ctx = getContext();
+        const chatId = ctx.getCurrentChatId?.() ?? ctx.chatId ?? null;
+        if (!_prevChatId) _prevChatId = chatId; // Initialize on first generation
+        const messageIndex = ctx.chat?.length ?? 0;
+        const settings = getSettings();
+        if (chatId && settings.enableCheckpoints !== false) {
+            const activeBooks = getActiveTunnelVisionBooks();
+            if (activeBooks.length > 0) {
+                if (checkpointManager.hasCheckpoint(chatId, messageIndex)) {
+                    // User is regenerating — undo the previous generation at this index first
+                    await checkpointManager.restoreForRegeneration(chatId, messageIndex);
+                }
+                checkpointManager.startRecording(chatId, messageIndex, activeBooks);
+            }
+        }
+    }
+
     const settings = getSettings();
     let runtimeState = null;
 
@@ -945,6 +995,9 @@ async function onMessageReceived(_messageId, type) {
     // writes triggered by the writer do not get blocked by the generation guard.
     _generationInProgress = false;
     window.TunnelVision_isRecursiveToolPass = false;
+
+    // Seal checkpoint for this generation (no-op if GENERATION_ENDED already sealed it)
+    checkpointManager.sealCheckpoint();
 
     // Never run sidecar writer on swipes, continues, first messages, or non-generation events.
     // Only run on normal 'normal' generation completions.

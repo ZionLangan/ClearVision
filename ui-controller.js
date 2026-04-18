@@ -19,6 +19,7 @@ import {
     removeNode,
     removeEntryFromTree,
     getAllEntryUids,
+    findNodeById,
     getSettings,
     getBookDescription,
     setBookDescription,
@@ -2728,4 +2729,153 @@ async function openNotebookEditor() {
     await callGenericPopup($popup, POPUP_TYPE.DISPLAY, '', {
         allowVerticalScrolling: true,
     });
+}
+
+// ─── WI Lorebook Button Injector ─────────────────────────────────────────────
+
+let _wiTVBtnInjecting = false;
+
+/** Find the tree node whose entryUids contains the given UID. */
+function findNodeByUid(node, uid) {
+    if (!node) return null;
+    if ((node.entryUids || []).includes(uid)) return node;
+    for (const child of (node.children || [])) {
+        const found = findNodeByUid(child, uid);
+        if (found) return found;
+    }
+    return null;
+}
+
+/**
+ * Poll the ST lorebook editor at 500ms and inject a TV eye-icon button into
+ * each entry's header row. Only active while a TV-managed lorebook is open.
+ * Follows the same pattern as initWIConditionInjector in index.js.
+ */
+export function initWITVButtonInjector() {
+    setInterval(() => {
+        if (_wiTVBtnInjecting) return;
+        const settings = getSettings();
+        if (settings.globalEnabled === false) return;
+
+        const list = document.getElementById('world_popup_entries_list');
+        if (!list || !list.offsetParent) return;
+
+        const sel = document.getElementById('world_editor_select');
+        if (!sel) return;
+        const bookName = sel.options[sel.selectedIndex]?.textContent?.trim();
+        if (!bookName) return;
+
+        const tree = getTree(bookName);
+        if (!tree || !tree.root) {
+            // Not a TV-managed lorebook — remove any previously injected buttons
+            list.querySelectorAll('.tv-wi-btn').forEach(btn => btn.remove());
+            return;
+        }
+
+        _wiTVBtnInjecting = true;
+        try {
+            const entries = list.querySelectorAll('.world_entry[uid]');
+            for (const entryEl of entries) {
+                const uid = Number(entryEl.getAttribute('uid'));
+                if (isNaN(uid)) continue;
+
+                const containingNode = findNodeByUid(tree.root, uid);
+                const existingBtn = entryEl.querySelector('.tv-wi-btn');
+
+                if (existingBtn) {
+                    // Refresh state in case the tree changed since last tick
+                    if (containingNode) {
+                        existingBtn.classList.add('tv-wi-btn-registered');
+                        existingBtn.title = `In TunnelVision: ${containingNode.label}`;
+                    } else {
+                        existingBtn.classList.remove('tv-wi-btn-registered');
+                        existingBtn.title = 'Add to TunnelVision';
+                    }
+                    continue;
+                }
+
+                // Inject a new button into the entry's header
+                const header = entryEl.querySelector('.inline-drawer-header');
+                if (!header) continue;
+
+                const btn = document.createElement('i');
+                btn.className = 'menu_button tv-wi-btn fa-solid fa-eye';
+                if (containingNode) {
+                    btn.classList.add('tv-wi-btn-registered');
+                    btn.title = `In TunnelVision: ${containingNode.label}`;
+                } else {
+                    btn.title = 'Add to TunnelVision';
+                }
+
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const currentSel = document.getElementById('world_editor_select');
+                    const currentBook = currentSel?.options[currentSel?.selectedIndex]?.textContent?.trim();
+                    if (currentBook) openWINodePicker(uid, currentBook);
+                });
+
+                header.appendChild(btn);
+            }
+        } finally {
+            _wiTVBtnInjecting = false;
+        }
+    }, 500);
+}
+
+/**
+ * Show a node picker popup so the user can assign (or move) a lorebook entry
+ * to a TunnelVision tree node. Clicking a row assigns immediately; the popup
+ * can then be dismissed. If the entry is already in the tree, clicking a
+ * different node moves it there.
+ */
+async function openWINodePicker(uid, bookName) {
+    const tree = getTree(bookName);
+    if (!tree || !tree.root) return;
+
+    const containingNode = findNodeByUid(tree.root, uid);
+
+    const $popup = $('<div class="tv-node-picker"></div>');
+    const $desc = $('<div class="tv-help-text tv-node-picker-desc"></div>');
+    $desc.text(containingNode
+        ? `Currently in "${containingNode.label}". Click a node to move it.`
+        : 'Click a node to add this entry to TunnelVision:');
+    $popup.append($desc);
+
+    const $list = $('<div class="tv-node-picker-list"></div>');
+
+    function buildRows(node, depth = 0) {
+        const $row = $('<button class="tv-node-picker-row" type="button"></button>');
+        $row.css('padding-left', `${8 + depth * 14}px`);
+
+        const isCurrentNode = containingNode && node.id === containingNode.id;
+        const $icon = $(`<i class="fa-solid ${isCurrentNode ? 'fa-folder-open' : 'fa-folder'} tv-node-picker-icon"></i>`);
+        const $label = $('<span></span>').text(node.label);
+        $row.append($icon, $label);
+
+        if (isCurrentNode) {
+            $row.addClass('tv-node-picker-current');
+        }
+
+        $row.on('click', () => {
+            const freshTree = getTree(bookName);
+            if (!freshTree) return;
+            const targetNode = findNodeById(freshTree.root, node.id);
+            if (!targetNode) return;
+            removeEntryFromTree(freshTree.root, uid);
+            addEntryToNode(targetNode, uid);
+            saveTree(bookName, freshTree);
+            const action = containingNode ? `Moved to "${node.label}"` : `Added to "${node.label}"`;
+            toastr.success(`${action} in TunnelVision.`, 'TunnelVision');
+        });
+
+        $list.append($row);
+        for (const child of node.children || []) {
+            buildRows(child, depth + 1);
+        }
+    }
+
+    buildRows(tree.root);
+    $popup.append($list);
+
+    await callGenericPopup($popup, POPUP_TYPE.DISPLAY, '', { allowVerticalScrolling: true });
 }

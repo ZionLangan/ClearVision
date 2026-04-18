@@ -25,7 +25,7 @@ import { renderExtensionTemplateAsync } from '../../../extensions.js';
 import { getSettings, isLorebookEnabled, setLorebookEnabled } from './tree-store.js';
 import { preflightToolRuntimeState, registerTools, getActiveTunnelVisionBooks } from './tool-registry.js';
 import { buildNotebookPrompt, resetNotebookWriteGuard } from './tools/notebook.js';
-import { bindUIEvents, refreshUI } from './ui-controller.js';
+import { bindUIEvents, refreshUI, initWITVButtonInjector } from './ui-controller.js';
 import { initActivityFeed } from './activity-feed.js';
 import { initCommands } from './commands.js';
 import { initAutoSummary } from './auto-summary.js';
@@ -81,6 +81,9 @@ async function init() {
 
     // Inject condition editor into ST's base lorebook editor
     initWIConditionInjector();
+
+    // Inject "Add to TunnelVision" button into lorebook entry headers
+    initWITVButtonInjector();
 
     // Load initial state
     refreshUI();

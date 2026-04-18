@@ -55,6 +55,7 @@ import { applyRecurseLimit } from './index.js';
 import { refreshHiddenToolCallMessages } from './activity-feed.js';
 import { separateConditions, isEvaluableCondition, formatCondition, EVALUABLE_TYPES, CONDITION_LABELS, getKeywordProbability, setKeywordProbability } from './conditions.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
+import { createEntry, forgetEntry } from './entry-manager.js';
 
 
 let currentLorebook = null;
@@ -1413,15 +1414,27 @@ async function onOpenTreeEditor() {
 
         // Direct entries
         const entryUids = node.entryUids || [];
-        if (entryUids.length > 0) {
-            const sectionLabel = isRoot ? 'Root Entries' : 'Direct Entries';
-            $body.append($(`<div class="tv-entry-section-title">${sectionLabel} <span class="tv-entry-section-count">(${entryUids.length})</span></div>`));
-            const $list = $('<div class="tv-entry-list-rows"></div>');
-            for (const uid of entryUids) {
-                const entry = entryLookup[uid];
-                $list.append(buildEntryRow(uid, entry, node, bookName, tree, isUnassigned));
+        const showNewEntry = !isUnassigned;
+
+        if (entryUids.length > 0 || showNewEntry) {
+            const sectionLabel = isRoot ? 'Root Entries' : isUnassigned ? 'Unassigned Entries' : 'Direct Entries';
+            const $sectionHeader = $('<div class="tv-entry-section-title"></div>');
+            $sectionHeader.append($(`<span>${sectionLabel} <span class="tv-entry-section-count">(${entryUids.length})</span></span>`));
+            if (showNewEntry) {
+                $sectionHeader.append($('<span style="flex:1"></span>'));
+                const $newBtn = $('<button class="tv-popup-btn tv-popup-btn-sm" title="Create a new entry in this node"><i class="fa-solid fa-plus"></i> New Entry</button>');
+                $newBtn.on('click', (e) => { e.stopPropagation(); openNewEntryDialog(node.id); });
+                $sectionHeader.append($newBtn);
             }
-            $body.append($list);
+            $body.append($sectionHeader);
+
+            if (entryUids.length > 0) {
+                const $list = $('<div class="tv-entry-list-rows"></div>');
+                for (const uid of entryUids) {
+                    $list.append(buildEntryRow(uid, entryLookup[uid], node, bookName, tree, isUnassigned));
+                }
+                $body.append($list);
+            }
         }
 
         // Child nodes
@@ -1859,12 +1872,111 @@ async function onOpenTreeEditor() {
                 $editRow.append($editBtn);
                 $expand.append($editRow);
 
+                // Delete Permanently button
+                const $deleteRow = $('<div class="tv-expand-delete-row"></div>');
+                const $deleteBtn = $('<button class="tv-popup-btn tv-popup-btn-sm tv-popup-btn-danger" title="Permanently delete this entry from the lorebook"><i class="fa-solid fa-trash-can"></i> Delete Permanently</button>');
+                $deleteBtn.on('click', async (e) => {
+                    e.stopPropagation();
+                    const entryLabel = entry.comment || entry.key?.[0] || `#${uid}`;
+                    if (!confirm(`Permanently delete "${entryLabel}"?\n\nThis removes it from the lorebook entirely and cannot be undone.`)) return;
+                    try {
+                        $deleteBtn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Deleting...');
+                        await forgetEntry(bookName, uid, true);
+                        delete entryLookup[uid];
+                        const entryKey = Object.keys(bookData.entries).find(k => bookData.entries[k].uid === uid);
+                        if (entryKey) delete bookData.entries[entryKey];
+                        renderTreeNodes();
+                        renderMainPanel();
+                        await renderUnassignedEntries(bookName, tree, bookData);
+                        registerTools();
+                        toastr.success(`Deleted "${entryLabel}".`, 'TunnelVision');
+                    } catch (err) {
+                        $deleteBtn.prop('disabled', false).html('<i class="fa-solid fa-trash-can"></i> Delete Permanently');
+                        toastr.error(err.message, 'TunnelVision');
+                    }
+                });
+                $deleteRow.append($deleteBtn);
+                $expand.append($deleteRow);
+
                 $row.after($expand);
                 $expand.slideDown(150);
             });
         }
 
         return $row;
+    }
+
+    async function openNewEntryDialog(defaultNodeId) {
+        // Build node selector options by walking the tree depth-first
+        const nodeOptions = [];
+        function collectNodes(node, depth) {
+            const indent = '\u00A0\u00A0'.repeat(depth);
+            nodeOptions.push({ id: node.id, label: indent + (depth === 0 ? 'Root' : (node.label || 'Unnamed')) });
+            for (const child of (node.children || [])) {
+                collectNodes(child, depth + 1);
+            }
+        }
+        collectNodes(tree.root, 0);
+
+        const $form = $('<div class="tv-new-entry-form"></div>');
+
+        const $titleField = $('<div class="tv-new-entry-field"></div>');
+        $titleField.append($('<label class="tv-label">Title <span class="tv-new-entry-required">*</span></label>'));
+        $titleField.append($('<input type="text" class="tv-new-entry-title" placeholder="Entry title" />'));
+        $form.append($titleField);
+
+        const $contentField = $('<div class="tv-new-entry-field"></div>');
+        $contentField.append($('<label class="tv-label">Content <span class="tv-new-entry-required">*</span></label>'));
+        $contentField.append($('<textarea class="tv-textarea tv-new-entry-content" rows="6" placeholder="Entry content..."></textarea>'));
+        $form.append($contentField);
+
+        const $keysField = $('<div class="tv-new-entry-field"></div>');
+        $keysField.append($('<label class="tv-label">Keywords <span class="tv-new-entry-hint">(optional, comma-separated)</span></label>'));
+        $keysField.append($('<input type="text" class="tv-new-entry-keys" placeholder="keyword1, keyword2" />'));
+        $form.append($keysField);
+
+        const $nodeField = $('<div class="tv-new-entry-field"></div>');
+        $nodeField.append($('<label class="tv-label">Category</label>'));
+        const $nodeSelect = $('<select class="tv-new-entry-node"></select>');
+        for (const n of nodeOptions) {
+            const $opt = $('<option></option>').val(n.id).text(n.label);
+            if (n.id === defaultNodeId) $opt.prop('selected', true);
+            $nodeSelect.append($opt);
+        }
+        $nodeField.append($nodeSelect);
+        $form.append($nodeField);
+
+        const result = await callGenericPopup($form, POPUP_TYPE.CONFIRM, '', {
+            okButton: 'Create Entry',
+            cancelButton: 'Cancel',
+            allowVerticalScrolling: true,
+        });
+
+        if (result !== 1) return;
+
+        const title = $form.find('.tv-new-entry-title').val().trim();
+        const content = $form.find('.tv-new-entry-content').val().trim();
+        const keysRaw = $form.find('.tv-new-entry-keys').val().trim();
+        const nodeId = $form.find('.tv-new-entry-node').val();
+        const keys = keysRaw ? keysRaw.split(',').map(k => k.trim()).filter(Boolean) : [];
+
+        if (!title) { toastr.warning('Title is required.', 'TunnelVision'); return; }
+        if (!content) { toastr.warning('Content is required.', 'TunnelVision'); return; }
+
+        try {
+            const created = await createEntry(bookName, { comment: title, content, keys, nodeId });
+            // Sync stale closed-over bookData and entryLookup
+            const freshBookData = await loadWorldInfo(bookName);
+            Object.assign(bookData.entries, freshBookData.entries);
+            Object.assign(entryLookup, buildEntryLookup(freshBookData));
+            renderTreeNodes();
+            renderMainPanel();
+            await renderUnassignedEntries(bookName, tree, bookData);
+            registerTools();
+            toastr.success(`Created "${created.comment}" in ${created.nodeLabel}.`, 'TunnelVision');
+        } catch (err) {
+            toastr.error(err.message, 'TunnelVision');
+        }
     }
 
     // --- Initial render ---

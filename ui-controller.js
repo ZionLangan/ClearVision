@@ -47,8 +47,6 @@ import {
     getBackLinks,
     addEntryLink,
     removeEntryLink,
-    getEntryLinksData,
-    setEntryLinksData,
 } from './tree-store.js';
 import { buildTreeFromMetadata, buildTreeWithLLM, generateSummariesForTree, ingestChatMessages } from './tree-builder.js';
 import { registerTools, unregisterTools, getDefaultToolDescriptions, stripDynamicContent } from './tool-registry.js';

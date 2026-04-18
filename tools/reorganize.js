@@ -7,10 +7,10 @@
 
 import {
     getTree,
+    saveTree,
     findNodeById,
     getSettings,
     getAllEntryUids,
-    setTreeNodeTemplate,
 } from '../tree-store.js';
 import { moveEntry, createCategory, listNodeEntries } from '../entry-manager.js';
 import { getActiveTunnelVisionBooks, resolveTargetBook, getBookListWithDescriptions } from '../tool-registry.js';
@@ -143,7 +143,8 @@ ${bookDesc}`,
                         return 'Cannot set template on the root node. Templates belong on category nodes.';
                     }
                     try {
-                        setTreeNodeTemplate(lorebook, node.id, args.template || '');
+                        node.template = args.template || '';
+                        saveTree(lorebook, tree);
                         return `Set template on "${node.label}" (ID: ${node.id}).${args.template ? '' : ' (template cleared)'}`;
                     } catch (e) {
                         console.error('[TunnelVision] Set template failed:', e);

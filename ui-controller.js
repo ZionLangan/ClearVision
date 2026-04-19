@@ -2910,8 +2910,8 @@ async function openWINodePicker(uid, bookName) {
                     const entryContent = entry.content || '';
 
                     const reformatted = await sidecarGenerate({
-                        systemPrompt: 'You are reformatting a lorebook entry to fit a structured schema. Output ONLY the reformatted content using the schema sections as headings. Do not add explanation, preamble, or JSON. Preserve all factual information from the original — do not invent new details.',
-                        prompt: `Reformat the lorebook entry below to match the schema template. Use each schema heading as a section and distribute the original content into the appropriate sections.\n\nEntry title: ${entryTitle}\n\nOriginal content:\n${entryContent}\n\nSchema template:\n${freshSchema}\n\nReturn only the reformatted content.`,
+                        systemPrompt: 'You are reformatting a lorebook entry to fit a structured schema. Output ONLY the reformatted content using the schema sections as headings. Do not add explanation, preamble, or JSON. Prioritize fitting the destination schema cleanly — it is acceptable to omit information from the original that does not naturally belong in any of the schema sections. Do not invent new details.',
+                        prompt: `Reformat the lorebook entry below to match the schema template. Use each schema heading as a section and distribute the original content into the appropriate sections. If any part of the original content does not fit the schema, leave it out rather than forcing it in.\n\nEntry title: ${entryTitle}\n\nOriginal content:\n${entryContent}\n\nSchema template:\n${freshSchema}\n\nReturn only the reformatted content.`,
                     });
 
                     // Save reformatted content back to the lorebook entry

@@ -44,6 +44,7 @@ const PROVIDER_MAP = {
     chutes:       { format: 'openai',    endpoint: 'https://llm.chutes.ai/v1/chat/completions',               secretKey: 'api_key_chutes' },
     electronhub:  { format: 'openai',    endpoint: 'https://api.electronhub.ai/v1/chat/completions',          secretKey: 'api_key_electronhub' },
     xai:          { format: 'openai',    endpoint: 'https://api.x.ai/v1/chat/completions',                    secretKey: 'api_key_xai' },
+    zai:          { format: 'openai',    endpoint: 'https://api.z.ai/api/paas/v4/chat/completions',           secretKey: 'api_key_zai' },  // coding variant resolved dynamically below
 };
 
 /**
@@ -173,6 +174,12 @@ function resolveProfileConfig() {
     // for raw Bearer-token fetch() calls. Only fall back to the profile URL for
     // 'custom' or unknown providers where we have no built-in endpoint.
     let endpoint = info.endpoint || profile['api-url'] || null;
+    // Z.AI has two variants: 'common' (default) and 'coding'. ST stores this as
+    // profile['api-url'] = 'common' | 'coding' — not an actual URL. Override the
+    // default PROVIDER_MAP endpoint when the profile selects the coding variant.
+    if (profile.api === 'zai' && profile['api-url'] === 'coding') {
+        endpoint = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
+    }
     // ST stores session-based proxy URLs (e.g. /api/subscription/v1) that don't
     // accept Bearer-token auth. Strip the /subscription segment for direct calls.
     if (endpoint && endpoint.includes('/subscription/')) {
